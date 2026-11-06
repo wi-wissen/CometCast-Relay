@@ -1,0 +1,7 @@
+# Secrets and generated config must never be committed.
+.env
+secrets/
+certs/
+*.pem
+*.key
+turnserver.conf
