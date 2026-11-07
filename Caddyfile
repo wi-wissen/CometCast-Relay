@@ -22,7 +22,7 @@
 
 		# Only what the relay needs is passed on. The Docker image also contains a copy of the web app and
 		# answers every other path with it; the public relay does not offer that.
-		@relay path /ws /healthz /altcha/challenge
+		@relay path /ws /healthz /altcha/challenge /ice-servers
 		handle @relay {
 			# Caddy replaces any X-Forwarded-For sent by the client with the address it saw (its default for
 			# clients it does not trust; checked locally with a forged header, docs/SETUP.md). The server

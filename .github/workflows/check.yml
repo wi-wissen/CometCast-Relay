@@ -31,7 +31,7 @@ jobs:
           for f in scripts/*.sh firewall/ufw.sh; do bash -n "$f"; done
 
       - name: python syntax
-        run: python3 -I -m py_compile scripts/ws-check.py
+        run: python3 -I -m py_compile scripts/ws-check.py scripts/stun-check.py
 
       - name: yamllint
         run: |
@@ -39,7 +39,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install --quiet yamllint==1.35.1
           "$RUNNER_TEMP/venv/bin/yamllint" -c .yamllint.yaml compose.yaml internal/compose.yaml .github/workflows .yamllint.yaml
 
-      - name: config consistency (mode, origins, trusted proxy, no TURN)
+      - name: config consistency (mode, origins, trusted proxy, no TURN, STUN list and STUN-only service)
         run: scripts/lint-config.sh
 
       - name: docker compose config (public relay)
@@ -57,6 +57,14 @@ jobs:
           echo 0123456789abcdef0123456789abcdef > secrets/turn_secret
           echo 0123456789abcdef0123456789abcdef > secrets/altcha_secret
           docker compose config --quiet
+
+      - name: STUN service (coturn accepts config/stun.conf, answers Binding, ignores Allocate)
+        run: scripts/check-stun.sh
+
+      - name: nftables files (syntax)
+        run: |
+          sudo nft -c -f firewall/nftables.conf
+          sudo nft -c -f firewall/stun-ratelimit.nft
 
       - name: Caddyfile (validate and format, with the image from compose.yaml)
         run: scripts/check-caddyfile.sh

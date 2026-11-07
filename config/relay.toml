@@ -8,6 +8,7 @@
 # Not set here on purpose: `listen` (the image listens on 0.0.0.0:8443 inside its container,
 # the port is never published), `[tls]` (Caddy does TLS), `[turn]` (refused in open mode),
 # all `limits.*` (the strict open-mode defaults apply; do not lower them without measuring).
+# `[stun]` IS set (below): it is allowed in open mode and needs a server release that knows it.
 #
 # For your own relay: change allowed_origins to the origin(s) of your web app. A web app on
 # GitHub Pages under https://example.org/app/ has the origin https://example.org .
@@ -32,3 +33,11 @@ trusted_proxies = ["172.29.53.2/32"]
 mode = "always"
 # Fixed secret so puzzles survive a restart. Made by scripts/gen-secrets.sh, at least 16 characters.
 secret_file = "/run/secrets/altcha_secret"
+
+[stun]
+# Public STUN servers listed at GET /ice-servers (no credentials; this is how browsers on different
+# networks learn their public address for a direct connection). Served by the "stun" service of
+# compose.yaml (coturn, STUN only, UDP). Host and port must be what clients can reach: the relay's
+# own name and the published port (scripts/lint-config.sh checks the format). TURN stays refused in
+# open mode: a [turn] section here is an error. At most 4 URLs; stun:/stuns: only.
+urls = ["stun:relay.cometcast.de:3478"]

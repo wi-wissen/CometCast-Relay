@@ -11,6 +11,9 @@
 #   --http-port N     HTTP port for the redirect check (default: HTTP_PORT from .env, else 80)
 #   --cacert FILE     CA certificate to trust (local tests with a private CA)
 #   --min-days N      the certificate must be valid for at least N more days (default 14)
+#   --stun-host NAME  host of the STUN service (default: host of the first [stun] url from /ice-servers)
+#   --stun-port N     UDP port of the STUN service (default: port of that url; with --ip also STUN_PORT from .env)
+#   --no-udp          skip the UDP STUN checks (from a network that blocks UDP; the list itself is still checked)
 #   --no-compose      skip the docker compose checks (use when run from another machine)
 #   --quiet-header    do not print the heading (used by update.sh)
 set -euo pipefail
@@ -23,12 +26,15 @@ ip=
 port=443
 http_port=80
 cacert=
+stun_host=
+stun_port=
+check_udp=1
 min_days=14
 use_compose=1
 header=1
 while [ $# -gt 0 ]; do
   case $1 in
-    --domain | --origin | --ip | --port | --http-port | --cacert | --min-days)
+    --domain | --origin | --ip | --port | --http-port | --cacert | --min-days | --stun-host | --stun-port)
       [ $# -ge 2 ] || die "$1 needs a value"
       case $1 in
         --domain) domain=$2 ;;
@@ -38,13 +44,16 @@ while [ $# -gt 0 ]; do
         --http-port) http_port=$2 ;;
         --cacert) cacert=$2 ;;
         --min-days) min_days=$2 ;;
+        --stun-host) stun_host=$2 ;;
+        --stun-port) stun_port=$2 ;;
       esac
       shift
       ;;
+    --no-udp) check_udp=0 ;;
     --no-compose) use_compose=0 ;;
     --quiet-header) header=0 ;;
     -h | --help)
-      sed -n '2,17p' "${BASH_SOURCE[0]}"
+      sed -n '2,20p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -65,9 +74,11 @@ if [ -z "$origin" ] && [ -f "$ROOT/config/relay.toml" ]; then
 fi
 [ -n "$origin" ] || die "no --origin given and none found in config/relay.toml"
 [[ $port =~ ^[0-9]+$ && $http_port =~ ^[0-9]+$ && $min_days =~ ^[0-9]+$ ]] || die "ports and --min-days must be numbers"
+[[ -z $stun_port || $stun_port =~ ^[0-9]+$ ]] || die "--stun-port must be a number"
 need_cmd curl
 need_cmd python3
 
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bad_origin=https://not-allowed.invalid
 base=https://$domain
 [ "$port" = 443 ] || base=$base:$port
@@ -100,7 +111,7 @@ fi
 # 1. containers
 if [ "$use_compose" -eq 1 ]; then
   if have_cmd docker && docker compose version >/dev/null 2>&1 && [ -f "$ROOT/.env" ]; then
-    for svc in cometcast-server caddy; do
+    for svc in cometcast-server caddy stun; do
       state=$(compose ps --format '{{.Health}}' "$svc" 2>/dev/null | head -n 1 || true)
       if [ "$state" = healthy ]; then
         ok "container $svc is healthy"
@@ -161,11 +172,82 @@ if [ "$(code_of root)" = 404 ]; then
 else
   fail "GET / -> $(code_of root) (expected 404; is the Caddyfile path allowlist in place?)"
 fi
-req ice "$base/ice-servers"
-if [ "$(code_of ice)" = 404 ]; then
-  ok "GET /ice-servers -> 404 (no TURN on the public relay)"
+# 5b. ICE servers: the public relay lists STUN only (no TURN, no credentials), with CORS for the web app
+req ice -H "Origin: $origin" "$base/ice-servers"
+stun_url=
+if [ "$(code_of ice)" = 200 ]; then
+  if ice_out=$(python3 -I - "$tmp/ice.b" "$ROOT/config/relay.toml" <<'PY' 2>&1
+import json, re, sys
+body = json.load(open(sys.argv[1]))
+if not isinstance(body, list) or not body:
+    sys.exit("expected a non-empty JSON array, got %r" % (body,))
+urls = []
+for e in body:
+    if not isinstance(e, dict) or set(e) != {"urls"}:
+        sys.exit("entry has fields other than urls (credentials or ttl must not be handed out here): %r" % (e,))
+    if not isinstance(e["urls"], list) or not e["urls"]:
+        sys.exit("urls must be a non-empty list: %r" % (e,))
+    for u in e["urls"]:
+        if not re.fullmatch(r"stuns?:[A-Za-z0-9.-]+(:[0-9]{1,5})?", u):
+            sys.exit("not a plain STUN url: %r" % (u,))
+        urls.append(u)
+try:
+    text = open(sys.argv[2]).read()
+except OSError:
+    text = ""
+text = re.sub(r"(?m)#.*$", "", text)
+m = re.search(r"(?ms)^\[stun\]\s*(.*?)(?=^\[|\Z)", text)
+if m:
+    want = re.findall(r'"([^"]*)"', (re.search(r"(?m)^urls\s*=\s*\[(.*?)\]", m.group(1), re.S) or [None, ""])[1])
+    if want and want != urls:
+        sys.exit("answer %r differs from [stun] urls in config/relay.toml %r" % (urls, want))
+print(urls[0])
+PY
+  ); then
+    stun_url=$ice_out
+    ok "GET /ice-servers -> 200, STUN only without credentials ($stun_url)"
+  else
+    fail "GET /ice-servers -> 200 but $ice_out"
+  fi
 else
-  fail "GET /ice-servers -> $(code_of ice) (expected 404)"
+  fail "GET /ice-servers -> $(code_of ice) (expected 200 with the STUN list; server release without [stun] support, or no [stun] section? $(head -c 100 "$tmp/ice.b"))"
+fi
+if [ "$(header_of ice access-control-allow-origin)" = "$origin" ]; then
+  ok "ice-servers answer allows origin $origin (Access-Control-Allow-Origin)"
+else
+  fail "ice-servers answer lacks Access-Control-Allow-Origin: $origin (got '$(header_of ice access-control-allow-origin)')"
+fi
+if header_of ice cache-control | grep -qi no-store; then
+  ok "ice-servers answer has Cache-Control: no-store"
+else
+  fail "ice-servers answer is missing Cache-Control: no-store"
+fi
+
+# 5c. the STUN service itself, over UDP (a real Binding request; Allocate must not work)
+if [ "$check_udp" -eq 0 ]; then
+  warn "UDP STUN checks skipped (--no-udp)"
+elif [ -z "$stun_url" ]; then
+  warn "UDP STUN checks skipped: no valid STUN url from /ice-servers"
+else
+  hp=${stun_url#*:}
+  url_host=${hp%%:*}
+  url_port=3478
+  [[ $hp == *:* ]] && url_port=${hp##*:}
+  t_host=${stun_host:-${ip:-$url_host}}
+  t_port=${stun_port:-$url_port}
+  if [ -z "$stun_port" ] && [ -n "$ip" ] && [ -n "$(env_get STUN_PORT)" ]; then t_port=$(env_get STUN_PORT); fi
+  if [[ $stun_url == stuns:* ]]; then
+    warn "first STUN url is stuns: (TLS); the UDP checks need a stun: url, skipped"
+  else
+    stun_out=$(python3 -I "$here/stun-check.py" --host "$t_host" --port "$t_port" 2>&1) && stun_rc=0 || stun_rc=$?
+    while IFS= read -r line; do
+      case $line in
+        ok\ *) ok "STUN $t_host:$t_port/udp ${line#ok }" ;;
+        *) fail "STUN $t_host:$t_port/udp ${line#FAIL}" ;;
+      esac
+    done <<<"$stun_out"
+    [ "$stun_rc" -eq 0 ] || [ -n "$stun_out" ] || fail "STUN check produced no output"
+  fi
 fi
 
 # 6. ALTCHA challenge, with CORS
@@ -204,7 +286,6 @@ fi
 ws_args=(--host "$domain" --port "$port")
 [ -z "$ip" ] || ws_args+=(--connect "$ip")
 [ -z "$cacert" ] || ws_args+=(--cafile "$cacert")
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if out=$(python3 -I "$here/ws-check.py" "${ws_args[@]}" --origin "$origin" --mode accept 2>&1); then
   ok "WebSocket /ws from $origin: $out"
 else

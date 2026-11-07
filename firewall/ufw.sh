@@ -6,15 +6,21 @@
 # Set SSH_PORT if sshd listens elsewhere. Make sure your SSH session is not locked out: the SSH rule is
 # added BEFORE ufw is enabled, but a wrong SSH_PORT still locks you out. Keep a second session open.
 #
-# Docker note: ports that Docker publishes (80, 443 here) are forwarded before ufw's INPUT rules and
+# Docker note: ports that Docker publishes (80, 443, 3478/udp here) are forwarded before ufw's INPUT rules and
 # are NOT filtered by ufw rules. ufw protects the host's own services (SSH and whatever else listens);
 # it cannot block a source address for the published ports. Use config/caddy.d/blocklist.caddy for that
-# (docs/SETUP.md "Abuse handling"). The 80/443 rules below only matter for traffic that reaches
+# (docs/SETUP.md "Abuse handling"). The 80/443/3478 rules below only matter for traffic that reaches
 # a host process (for example docker-proxy for IPv6).
+# STUN rate limiting: ufw has no rule for it that works on Docker-published ports. firewall/stun-ratelimit.nft
+# has the per-source limit (own nft table, prerouting, before Docker's NAT); load it in addition to ufw:
+#   sudo nft -f firewall/stun-ratelimit.nft        (docs/SETUP.md "STUN service")
+# Set STUN_PORT if the STUN service is published on another UDP port.
 set -euo pipefail
 
 SSH_PORT=${SSH_PORT:-22}
 [[ $SSH_PORT =~ ^[0-9]+$ ]] || { echo "error: SSH_PORT must be a number" >&2; exit 1; }
+STUN_PORT=${STUN_PORT:-3478}
+[[ $STUN_PORT =~ ^[0-9]+$ ]] || { echo "error: STUN_PORT must be a number" >&2; exit 1; }
 
 apply=0
 case "${1:-}" in
@@ -29,6 +35,7 @@ cmds=(
   "ufw limit ${SSH_PORT}/tcp comment ssh"
   "ufw allow 80/tcp comment http-acme-redirect"
   "ufw allow 443/tcp comment https-wss"
+  "ufw allow ${STUN_PORT}/udp comment stun"
   "ufw --force enable"
 )
 

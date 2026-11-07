@@ -113,6 +113,21 @@ else
   warn "'ss' not found: ports 80/443 not checked"
 fi
 
+# --- UDP port of the STUN service ---
+if have_cmd ss; then
+  stun_port=$(env_get STUN_PORT)
+  [ -n "$stun_port" ] || stun_port=3478
+  if ss -H -lun "sport = :$stun_port" 2>/dev/null | grep -q .; then
+    if docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -q "cometcast-relay.*:$stun_port->.*/udp"; then
+      ok "UDP port $stun_port: used by this stack already"
+    else
+      fail "UDP port $stun_port is already in use ($(ss -H -lunp "sport = :$stun_port" 2>/dev/null | head -n 1 | awk '{ print $NF }')); the STUN service needs it"
+    fi
+  else
+    ok "UDP port $stun_port is free (STUN service)"
+  fi
+fi
+
 # --- DNS ---
 if have_cmd getent; then
   resolved=$(getent ahosts "$domain" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ' || true)

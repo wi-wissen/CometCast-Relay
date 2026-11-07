@@ -1,0 +1,36 @@
+#!/usr/sbin/nft -f
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Per-source rate limit for the public STUN service (UDP 3478), as a table of its own: it works next to ufw
+# or firewall/nftables.conf and never touches Docker's tables or any other rule.
+# Check without applying:  nft -c -f firewall/stun-ratelimit.nft      (as root)
+# Apply:                   nft -f firewall/stun-ratelimit.nft         (as root; replaces only this table)
+# Remove:                  nft delete table inet cometcast_stun
+# Permanent: UNCERTAIN, depends on the distribution (for example an include line in /etc/nftables.conf, see the
+# note in nftables.conf). Rules are lost at reboot otherwise.
+# Change `3478` in the three rules if you publish another port (STUN_PORT in .env).
+#
+# Why prerouting at priority raw: Docker publishes the port with NAT, so the packets are FORWARDED, not input:
+# ufw rules and an input chain never see them. The raw hook runs before connection tracking and before
+# Docker's NAT, so it sees every packet for the port and costs little.
+
+table inet cometcast_stun
+flush table inet cometcast_stun
+
+table inet cometcast_stun {
+	# STUN reflection/amplification brake (docs/SETUP.md "STUN service"). A STUN Binding answer is small
+	# (32 bytes for a 20 byte request) but UDP sources can be forged, so an attacker could make the
+	# service send answers to a victim. Per source address (the victim's, when forged) and in total:
+	#   - per IPv4 address, or per IPv6 /64: at most 100 packets/s, burst 200
+	#   - all sources together: at most 5000 packets/s (protects the VPS itself)
+	# Residual: a forged source can use up a real client's budget for a moment (that client's STUN
+	# request is then dropped and it retries), and the global ceiling can be used up by a flood.
+	# UNCERTAIN: all numbers are guesses, never load-tested.
+	chain stun_ratelimit {
+		type filter hook prerouting priority raw; policy accept;
+
+		udp dport 3478 meter stun_v4 { ip saddr timeout 60s limit rate over 100/second burst 200 packets } drop
+		udp dport 3478 meter stun_v6 { ip6 saddr and ffff:ffff:ffff:ffff:: timeout 60s limit rate over 100/second burst 200 packets } drop
+		udp dport 3478 limit rate over 5000/second burst 5000 packets drop
+	}
+}

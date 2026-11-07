@@ -31,7 +31,10 @@ allow = ["10.0.0.0/8", "192.168.0.0/16"]
 mode = "optional"
 secret_file = "/run/secrets/altcha_secret"
 
-# TURN credentials at GET /ice-servers (internal mode only). Same secret as coturn.
+# TURN credentials at GET /ice-servers (internal mode only). Same secret as coturn. The STUN entry of the
+# answer comes from stun_urls below. (A top-level [stun] section with the same kind of URLs exists in server
+# releases that include the open-mode STUN change; it is not needed here because [turn] already carries
+# stun_urls, so this file works with older releases too.)
 [turn]
 urls = ["turn:relay.example.org:3478?transport=udp", "turns:relay.example.org:5349?transport=tcp"]
 stun_urls = ["stun:relay.example.org:3478"]

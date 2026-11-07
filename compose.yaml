@@ -11,6 +11,10 @@
 #   config/relay.toml; scripts/lint-config.sh checks that.
 # - No TURN service: the server refuses a [turn] section in open mode (internal/ has an
 #   optional internal-mode profile with coturn).
+# - STUN only: service "stun" is coturn in STUN-only mode (config/stun.conf): UDP 3478, answers
+#   Binding requests, never allocates a relay. The server lists it at /ice-servers ([stun] in
+#   config/relay.toml) so that browsers on different networks can find a direct path. It needs a
+#   server release with [stun] support (COMETCAST_VERSION in .env.example).
 # - Status of this file: `docker compose config` is checked in CI. The full stack was run once on a
 #   local machine with a local certificate (see docs/SETUP.md "What was tested").
 #   UNCERTAIN: a run on a real VPS with a public certificate has not happened yet.
@@ -116,9 +120,51 @@ services:
       retries: 3
       start_period: 10s
 
+  # Public STUN service, no accounts and no secrets. coturn in STUN-only mode: it answers a Binding
+  # request ("which public address and port do you see for me?") and refuses everything else. Only
+  # UDP 3478 is published. Own network: Docker's NAT keeps the client's source address, which STUN
+  # reports back; it is not host networking, so the container sees no host service.
+  # UNCERTAIN: never run on a real VPS (see docs/SETUP.md "STUN service" for what was tested).
+  stun:
+    # Pinned by tag AND digest (tag 4.18.0 is the one run; digest of the multi-arch index as pulled
+    # from Docker Hub on 2026-11-07). Update both together after checking config/stun.conf with it.
+    image: coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+    restart: unless-stopped
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    networks: [stun]
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${STUN_PORT:-3478}:3478/udp"
+    volumes:
+      - ./config/stun.conf:/etc/coturn/turnserver.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/tmp
+    # The turnserver binary carries a file capability; without NET_BIND_SERVICE it cannot even
+    # start under cap_drop ALL (found in the product repository's first run). Nothing else is added.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    # UNCERTAIN: unmeasured guesses. STUN needs almost nothing; coturn starts a few threads per CPU.
+    mem_limit: 128m
+    pids_limit: 256
+    cpus: 0.5
+    stop_grace_period: 5s
+    logging: *logging
+    healthcheck:
+      # A real STUN Binding request over UDP to the service itself (exit 0 when answered).
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 networks:
   # Reachable from the internet side; ACME and published ports use it.
   edge: {}
+  # STUN service only (published UDP port, outbound not needed).
+  stun: {}
   # Server <-> Caddy only. internal: true means no route to the outside.
   backend:
     internal: true

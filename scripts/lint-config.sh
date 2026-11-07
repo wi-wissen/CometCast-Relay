@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Static consistency checks of the configuration files (no Docker, no network). Used by up.sh and CI.
 # It cannot replace the server's own validation at start; it catches the mistakes that would
-# otherwise show up as an outage: wrong mode, TURN section, missing origins, proxy address mismatch.
+# otherwise show up as an outage: wrong mode, TURN section, missing origins, proxy address mismatch,
+# STUN list that does not match the STUN service, a STUN service that could relay.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -87,6 +88,68 @@ else
 fi
 if [ -n "$subnet" ] && [ -n "$caddy_ip" ] && [ "${caddy_ip%.*}" != "${subnet%.*}" ]; then
   fail "compose.yaml: caddy address $caddy_ip is not in subnet $subnet"
+fi
+
+# --- STUN list ([stun] urls) and the STUN service (compose.yaml service "stun", config/stun.conf) ---
+stun_conf=$ROOT/config/stun.conf
+[ -f "$stun_conf" ] || die "missing $stun_conf"
+stun_active=$(sed -e 's/[[:space:]]*#.*$//' "$stun_conf")
+
+stun_line=$(sed -n '/^\[stun\]/,/^\[/p' <<<"$active" | grep -E '^urls[[:space:]]*=' || true)
+if [ -z "$stun_line" ]; then
+  fail "relay.toml: [stun] urls is not set (browsers on other networks get no STUN server from /ice-servers)"
+else
+  stun_count=0
+  while IFS= read -r entry; do
+    stun_count=$((stun_count + 1))
+    if ! [[ $entry =~ ^stuns?:[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]; then
+      fail "relay.toml: [stun] url '$entry' is not stun:host:port (only stun:/stuns:, no credentials, path or query)"
+    fi
+  done < <(grep -o '"[^"]*"' <<<"$stun_line" | tr -d '"')
+  if [ "$stun_count" -eq 0 ]; then
+    fail "relay.toml: [stun] urls is empty"
+  elif [ "$stun_count" -gt 4 ]; then
+    fail "relay.toml: [stun] has $stun_count urls (the server accepts at most 4)"
+  else
+    ok "[stun] urls: $(grep -o '"[^"]*"' <<<"$stun_line" | tr '\n' ' ')"
+  fi
+  # The first URL should point at this relay's name and the published STUN port.
+  first=$(grep -o '"[^"]*"' <<<"$stun_line" | tr -d '"' | head -n 1)
+  want_host=$(env_get RELAY_DOMAIN)
+  [ -n "$want_host" ] || want_host=relay.cometcast.de
+  want_port=$(env_get STUN_PORT)
+  [ -n "$want_port" ] || want_port=3478
+  if [ "$first" != "stun:$want_host:$want_port" ]; then
+    warn "first [stun] url is '$first', the stun service is published as stun:$want_host:$want_port (RELAY_DOMAIN, STUN_PORT in .env); fine only if that is intended (another STUN host or a NAT port mapping)"
+  fi
+fi
+
+# The service must exist, publish UDP only, and the coturn config must keep it STUN-only.
+if grep -Eq '^  stun:[[:space:]]*$' "$compose_file"; then
+  ok "compose.yaml has the stun service"
+  stun_ports=$(awk '/^  stun:[[:space:]]*$/ { in_s = 1; next } in_s && (/^  [a-z_-]+:[[:space:]]*$/ || /^[a-z]/) { in_s = 0 } in_s && /^[[:space:]]+- "/ { print $2 }' "$compose_file")
+  if [ -n "$stun_ports" ] && ! grep -qv '/udp"$' <<<"$stun_ports"; then
+    ok "the stun service publishes UDP only"
+  else
+    fail "compose.yaml: the stun service must publish only UDP ports (found: ${stun_ports:-none})"
+  fi
+else
+  fail "compose.yaml: no stun service (the [stun] list would point at nothing)"
+fi
+if grep -Eq '^stun-only[[:space:]]*$' <<<"$stun_active"; then
+  ok "stun.conf: stun-only"
+else
+  fail "config/stun.conf: 'stun-only' is missing (the service could then hand out TURN relays)"
+fi
+for forbidden in 'no-auth' 'lt-cred-mech' 'use-auth-secret' 'static-auth-secret' 'user' 'userdb' 'cli-password' 'allow-loopback-peers' 'allowed-peer-ip' 'external-ip' 'relay-ip' 'listening-ip' 'tls-listening-port'; do
+  if grep -Eq "^$forbidden([[:space:]]*=|[[:space:]]*\$)" <<<"$stun_active"; then
+    fail "config/stun.conf: '$forbidden' has no place in a STUN-only service (accounts, secrets, TURN or address settings)"
+  fi
+done
+if grep -Eq '^(no-tcp|no-tls)[[:space:]]*$' <<<"$stun_active" && [ "$(grep -Ec '^(no-tcp|no-tls)[[:space:]]*$' <<<"$stun_active")" -eq 2 ]; then
+  ok "stun.conf: UDP only (no-tcp, no-tls)"
+else
+  fail "config/stun.conf: 'no-tcp' and 'no-tls' must both be set (UDP 3478 only)"
 fi
 
 if [ "$N_FAIL" -gt 0 ]; then

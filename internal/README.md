@@ -1,8 +1,10 @@
 # Optional profile: internal server with TURN
 
 **This is not the public relay.** The public relay (`relay.cometcast.de`, repository root) runs in
-`open` mode, which has no TURN: the server refuses a `[turn]` section there. TURN credentials exist in
-`internal` mode only. This folder is for an organisation that wants its own server for its own devices
+`open` mode, which has no TURN: the server refuses a `[turn]` section there (it only lists a STUN server, see
+[docs/SETUP.md](../docs/SETUP.md) "STUN service"). TURN credentials exist in `internal` mode only; this profile's
+coturn also answers STUN on 3478 (`stun_urls` in `[turn]`), so it needs no separate STUN service (do not run it on the same host as the public relay's STUN service: both
+want UDP 3478). This folder is for an organisation that wants its own server for its own devices
 with a TURN relay (coturn) so calls also work across networks.
 
 Reference for everything below: the product repository,

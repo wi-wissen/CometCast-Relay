@@ -3,7 +3,7 @@
 A step-by-step runbook for one fresh Debian or Ubuntu VPS. Written so that you can also run your own relay
 (change the name, the origin and the version).
 
-Status: the whole stack (server image, Caddy, scripts, update, rollback) was run **once on a local machine with a
+Status: the whole stack (server image, Caddy, STUN service, scripts, update, rollback) was run **once on a local machine with a
 private certificate** (section 12). It has **not** been run on a real VPS with a public name and a Let's Encrypt
 certificate. Everything that depends on that is marked **UNCERTAIN**. Do a dry run with a test name first.
 
@@ -15,18 +15,23 @@ browser (https://cometcast.de/app/)  --wss/https-->  relay.cometcast.de:443
                                                     Caddy (TLS, automatic certificate)
                                                          |  plain HTTP, internal Docker network
                                                     cometcast-server (open mode, port 8443, not published)
+
+browser / app  --UDP 3478-->  relay.cometcast.de:3478  --> stun (coturn, STUN only: no relaying)
 ```
 
 - **Open mode:** the server mediates connections (room codes, WebRTC offers and answers). Creating a room needs a solved
   ALTCHA proof-of-work puzzle. Join approval ("who may join") is a feature of the clients, not of the server. The server
   stores nothing on disk and never relays images, files or media.
-- **No TURN and no STUN from this relay.** In open mode the server refuses a `[turn]` section and `/ice-servers` answers
-  404. The STUN URLs the server can hand out are part of that same section, so the public relay hands out **none**.
-  Whether the web app falls back to STUN servers of its own was not checked here (the web app code asks only `/ice-servers`).
-  **Owner decision needed** (section 13). For TURN use the optional `internal/` profile of this repository, which runs an
-  internal-mode server for an organisation; it is a different server, not an add-on for the public one.
-- **Caddy** terminates TLS, gets and renews the certificate itself, passes only `/ws`, `/healthz` and `/altcha/challenge`
-  to the server (everything else is 404; the Docker image also contains a copy of the web app, which the public relay
+- **STUN yes, TURN no.** Connection order of the product: direct WebRTC first, then an internal server (TURN/SFU), then
+  the receiver's own Wi-Fi. For the direct step across NATs a browser needs a STUN server, so the public relay lists one
+  at `GET /ice-servers` (`[stun]` in `config/relay.toml`, answer `[{"urls":["stun:relay.cometcast.de:3478"]}]`, no
+  credentials) and runs it itself (service `stun`, section 10.9): coturn in STUN-only mode, no third party. The server
+  still refuses a `[turn]` section in open mode: open TURN would be an abuse risk, so relayed media exists on internal
+  servers only. Use the optional `internal/` profile for an organisation's own server with TURN; it is a different
+  server, not an add-on for the public one. Without TURN, a connection between two devices behind strict NATs or
+  firewalls (for example symmetric NAT on both sides) can still fail; the share is unmeasured.
+- **Caddy** terminates TLS, gets and renews the certificate itself, passes only `/ws`, `/healthz`, `/altcha/challenge`
+  and `/ice-servers` to the server (everything else is 404; the Docker image also contains a copy of the web app, which the public relay
   does not offer) and sets `X-Forwarded-For`. The server believes that header only from Caddy's address
   (`network.trusted_proxies`).
 - **CORS:** the web app on GitHub Pages calls the relay from another origin. `allowed_origins = ["https://cometcast.de"]`
@@ -41,7 +46,8 @@ browser (https://cometcast.de/app/)  --wss/https-->  relay.cometcast.de:443
 | A domain name you control | For the public relay: `relay.cometcast.de`. |
 | Outbound internet from the VPS | Docker images (Docker Hub for Caddy, ghcr.io for the server), Let's Encrypt. |
 | Inbound TCP 80 and 443 | 80 is needed for certificate requests and the HTTP-to-HTTPS redirect. |
-| An exact release of the server image | Tags of `ghcr.io/wi-wissen/cometcast-server` (see the product repository's [docs/releasing.md](https://github.com/wi-wissen/CometCast/blob/main/docs/releasing.md)). **UNCERTAIN: no release has been published yet**, so `0.1.0` in `.env.example` is a placeholder. The release workflow pushes only the version tag; `latest` is moved by a separate workflow and is not used here. |
+| Inbound UDP 3478 | The STUN service (section 10.9). Check the provider's firewall as well: many block UDP by default. |
+| An exact release of the server image | It must be a release that **knows the `[stun]` section** (product change "Add STUN support to open mode"); an older server refuses to start (unknown key). **UNCERTAIN: which version number first contains it.** Tags of `ghcr.io/wi-wissen/cometcast-server` (see the product repository's [docs/releasing.md](https://github.com/wi-wissen/CometCast/blob/main/docs/releasing.md)). **UNCERTAIN: no release has been published yet**, so `0.1.0` in `.env.example` is a placeholder. The release workflow pushes only the version tag; `latest` is moved by a separate workflow and is not used here. |
 
 Hosting provider, region and registrar are the owner's choice (section 13). For a German project, a provider in the EU
 simplifies the privacy notice; this is a suggestion, not a requirement of the software.
@@ -55,6 +61,9 @@ records are described in the product repository's [docs/website.md](https://gith
 | --- | --- | --- |
 | `relay.cometcast.de` | A | the VPS's public IPv4 address |
 | `relay.cometcast.de` | AAAA | **not yet** (see below) |
+
+The STUN service uses the same name (`stun:relay.cometcast.de:3478`); no extra record is needed. It is published on IPv4
+only, like the other ports.
 
 - Use a short TTL (300 s) until everything works, raise it later. Do not use a wildcard record.
 - **Do not create an AAAA record yet.** `compose.yaml` publishes the ports on IPv4 only. Docker's IPv6 port publishing
@@ -98,9 +107,12 @@ Log in as root on the new VPS (first time only), then:
    sudo firewall/ufw.sh --apply
    # or: sudo nft -c -f firewall/nftables.conf   (check), then sudo nft -f firewall/nftables.conf
    ```
-   **Docker and ufw:** ports that Docker publishes (80, 443) are forwarded before ufw's rules and are not filtered by them.
+   **Docker and ufw:** ports that Docker publishes (80, 443, UDP 3478) are forwarded before ufw's rules and are not filtered by them.
    The firewall protects the host's own services (SSH). To block a client address for the relay use Caddy's block list
    (section 10.5), not `ufw deny`. A provider-level firewall (security group) in front of the VPS is a good second layer.
+   **STUN rate limit:** load `firewall/stun-ratelimit.nft` in addition (`sudo nft -c -f firewall/stun-ratelimit.nft`, then
+   `sudo nft -f firewall/stun-ratelimit.nft`; it is its own table and works next to ufw or `nftables.conf`). It is the only
+   firewall piece that sees the published UDP port; see section 10.9 for what it does and does not protect.
 5. **Time:** `timedatectl` must show `System clock synchronized: yes` (TLS and ALTCHA expiry depend on it).
 
 ## 4. Get this repository
@@ -128,14 +140,17 @@ $EDITOR .env
 | --- | --- |
 | `COMETCAST_VERSION` | Exact server release, for example `0.1.0`. Never `latest`. |
 | `RELAY_DOMAIN` | `relay.cometcast.de` (the name Caddy requests the certificate for). |
-| `BIND_ADDR`, `HTTP_PORT`, `HTTPS_PORT` | Leave commented on a real server (defaults `0.0.0.0`, 80, 443). |
+| `BIND_ADDR`, `HTTP_PORT`, `HTTPS_PORT`, `STUN_PORT` | Leave commented on a real server (defaults `0.0.0.0`, 80, 443, UDP 3478). `STUN_PORT` is the host side of the STUN port; if you change it, change the URL in `[stun]` too. |
 
 `config/relay.toml` is committed with the real values for `relay.cometcast.de` (no secrets). For your own relay edit:
 
 - `allowed_origins`: the origins of **your** web app (`https://host[:port]`, exact, no path, no `*`).
+- `[stun] urls`: the relay's own name and the STUN port (`stun:relay.cometcast.de:3478`); at most 4, only `stun:`/`stuns:`,
+  no credentials. Use your own name for your own relay.
 - `network.trusted_proxies`: must equal Caddy's address in `compose.yaml` (`172.29.53.2/32`). If you change the subnet
   there, change it here too. `scripts/lint-config.sh` checks the pair and the other invariants (open mode, no `[turn]`,
-  no inline secret, origins well-formed). It runs automatically in `up.sh` and in CI.
+  no inline secret, origins well-formed, `[stun]` urls well-formed, the stun service exists, publishes UDP only and its
+  coturn config is STUN-only). It runs automatically in `up.sh` and in CI.
 - Leave all `limits.*` unset: open mode has strict defaults and all numbers are unmeasured placeholders in the product.
   Do not lower them without measuring. Shared networks (a school, an office behind one address) share one bucket per
   address, see section 11.
@@ -182,7 +197,10 @@ scripts/verify.sh
 
 Pass/fail output, exit code 0 only if everything passed. It checks, in this order: both containers healthy; the TLS
 certificate verifies and is valid for at least 14 more days; `GET /healthz` is `200 ok`; port 80 redirects to HTTPS;
-`/` and `/ice-servers` are `404`; `GET /altcha/challenge` returns a puzzle with `Cache-Control: no-store` and
+`/` is `404`; `GET /ice-servers` is `200` with a STUN-only list (entries have only `urls`, they equal `[stun] urls` in
+`config/relay.toml`) and the CORS and `no-store` headers; a real STUN Binding request over UDP to the host and port of the
+first URL (`scripts/stun-check.py`) gets a success with your public address and a small answer (at most 3 times the request),
+a TURN Allocate request gets no success, and random bytes get no answer; `GET /altcha/challenge` returns a puzzle with `Cache-Control: no-store` and
 `Access-Control-Allow-Origin: https://cometcast.de`; the CORS preflight from `https://cometcast.de` gives `204` and from a
 foreign origin `403`; a real WebSocket handshake (`scripts/ws-check.py`, standard library only) from the allowed origin
 gives `101`, a `hello` answer, and `altcha_required` for `create_room` without a puzzle solution (proves open mode with
@@ -201,7 +219,9 @@ python3 -I scripts/ws-check.py --host $R --origin https://evil.example --mode re
 ```
 
 From another machine (no Docker needed; clone this repository there, `curl`, `openssl` and `python3` are enough):
-`scripts/verify.sh --no-compose --origin https://cometcast.de`.
+`scripts/verify.sh --no-compose --origin https://cometcast.de` (add `--no-udp` from a network that blocks UDP). Running
+it from **outside** is the only way to see the real STUN answer: the address in the answer must be the machine's public
+address, not a `172.x` one.
 Before DNS is switched, `--ip ADDRESS` connects to a given address (the certificate then does not verify unless the name
 points there; use it only after the A record exists).
 
@@ -218,8 +238,10 @@ The web app is static and lives on GitHub Pages. It picks its relay in this orde
 repository builds with `VITE_DEFAULT_RELAY=wss://relay.cometcast.de/ws`, so no change is needed here. For a quick test of a
 relay: `https://cometcast.de/app/?server=wss://relay.cometcast.de/ws`. Then create a room in one browser and join with the code
 in another (two real browsers, ideally on different networks). **UNCERTAIN: real GitHub Pages (path `/app/`, optional
-`config.json` 404) and the whole flow against the real relay were not tried.** Without STUN or TURN, direct connections work
-only where the two devices can reach each other (usually the same network), see section 0.
+`config.json` 404) and the whole flow against the real relay were not tried.** The web app asks only `/ice-servers`, so
+it takes the relay's STUN server from there; direct connections across networks work where NATs allow them, and
+without TURN not everywhere (section 0). **UNCERTAIN: a real browser connection across two networks through this STUN
+service was never made.**
 
 ## 10. Operate
 
@@ -234,15 +256,17 @@ docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .le
 
 - **Server:** prints a start banner (version, mode, ALTCHA, allowed origins, trusted proxy) and warnings. It has **no log
   levels, no access log, no metrics endpoint** and does not log bans or rate limits. Expected banner lines:
-  `mode: open (mediation only); ALTCHA for create_room: required`, `allowed web origins: https://cometcast.de ...`,
+  `mode: open (mediation only); ALTCHA for create_room: required`, `STUN list: on (GET /ice-servers, no credentials)`, `allowed web origins: https://cometcast.de ...`,
   `trusting X-Forwarded-For from 1 proxy network(s)`.
 - **Caddy:** container log with errors and certificate events. The access log is off (it records IP addresses; section 10.5).
+- **STUN (coturn):** `docker compose logs stun` shows the start-up lines only. At the default verbosity coturn does **not** log STUN Binding requests or client addresses (checked: no line per request). Keep it that way: do not add `verbose` to `config/stun.conf` without deciding about the privacy notice.
 - Logs rotate per service: `json-file`, 10 MB x 5 files each. Look at them with `docker compose logs`, they live under
   `/var/lib/docker/containers/`.
 
 ### 10.2 Restart, stop, configuration change
 
 ```sh
+docker compose restart stun               # config/stun.conf changed (the file is read at start)
 docker compose restart cometcast-server   # config/relay.toml changed; ends all rooms; also clears all bans (see 10.5)
 docker compose restart caddy              # Caddyfile changed (single-file mount: an editor that replaces the file needs this)
 docker compose up -d --force-recreate     # everything
@@ -264,6 +288,8 @@ fails (`--no-rollback` to keep the failed state for inspection; `--no-pull` for 
 
 The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
 `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
+
+Update the STUN service the same way: edit the pinned `coturn/coturn:<tag>@sha256:...` line in `compose.yaml`, run `scripts/check-stun.sh` (starts that image with `config/stun.conf` and checks it) and `scripts/up.sh`. Another coturn version can know other options: a wrong option is a start error or a `Bad configuration format` warning, which `check-stun.sh` turns into a failure.
 
 Update Caddy by editing the pinned image line (tag and digest) in `compose.yaml` (`caddy:2.11.9@sha256:...`), then
 `scripts/check-caddyfile.sh` (validates the Caddyfile with the new image) and `scripts/up.sh`. Get a digest with
@@ -325,6 +351,7 @@ The only visibility is at the edge:
 
 | What | Where | Needed? |
 | --- | --- | --- |
+| STUN service | none | **No state**, no volume, no secret. |
 | Rooms, bans, counters | server memory | **No state on disk** (confirmed by the server documentation). Nothing to back up; a restart ends all rooms and clears bans. |
 | Configuration | this repository (`config/`, `Caddyfile`, `compose.yaml`) | In git. |
 | `.env` | host only, no secrets inside | Keep a copy of the two values (version, domain). |
@@ -383,6 +410,55 @@ manipulated signalling channel (for example by checking DTLS fingerprints out of
 7. If the **image** is suspected: images are unsigned; compare digests with the release notes of the product repository, and rebuild
    from source (`deploy/Dockerfile` in the product repository) if in doubt.
 
+### 10.9 STUN service
+
+What it is: the compose service `stun`, **coturn 4.18.0 in STUN-only mode** (`config/stun.conf`, no secrets). It answers a
+STUN Binding request ("which public address and port do you see for me?") on **UDP 3478** and nothing else. Browsers use that
+answer to build the candidates for a direct connection across NATs. Why coturn: it is the program the product repository
+already uses for TURN (licence: BSD-3-Clause according to its repository, **UNCERTAIN: not re-checked for the image**; no third-party service involved), its STUN-only mode is a documented option, and the
+operator learns one program, not two. A smaller STUN-only program would also do; none was evaluated in this repository.
+
+How it is locked down (all checked on a local run, section 12):
+
+| Property | Setting |
+| --- | --- |
+| No relaying | `stun-only` (coturn ignores every TURN request) and `no-tcp-relay`. No users, no secret, no realm, no `no-auth`. A TURN Allocate request, also one made with `turnutils_uclient` and made-up credentials, gets **no answer at all** and no allocation. `scripts/stun-check.py` checks this on every `verify.sh` run; it was also run against a normal TURN server and **failed** it there, as it must. |
+| Listeners | UDP 3478 only (`no-tcp`, `no-tls`; DTLS is off by default in 4.18). Published as `3478/udp` only. STUN over TCP/TLS is not offered: browsers use UDP for this and TCP would add nothing but a service to attack. |
+| Small answers | A Binding answer is **32 bytes for a 20-byte request** (factor 1.6): header plus XOR-MAPPED-ADDRESS, no SOFTWARE, no RFC 3489 or RFC 5780 attributes (`no-rfc5780`, `no-software-attribute`; in 4.18 these are defaults, written down so a newer coturn cannot widen the answer silently). `stun-check.py` fails if the answer ever exceeds 3 times the request. |
+| Garbage | Random bytes get no answer. |
+| Container | not host networking (own Docker network `stun`, so it sees no host service); `read_only`, `tmpfs` for `/tmp`, user `nobody`, `cap_drop: ALL` with only `NET_BIND_SERVICE` added back (needed by the binary's file capability, effective capabilities are empty), `no-new-privileges`, `mem_limit 128m`, `pids_limit 256`, `cpus 0.5` (UNCERTAIN: guesses, never load-tested), image pinned by tag and digest, health check = a real Binding request (`turnutils_stunclient`). |
+| Logs | No per-request log lines and no client addresses at the default verbosity. |
+| Privacy | The service sees the source address of every request, as any STUN server does, and does not store it. Mention it in the privacy notice (the browser contacts this host on connect). |
+
+**Residual risk, honestly: reflection and amplification.** STUN runs over UDP, and UDP source addresses can be forged. An attacker
+can send Binding requests with a victim's address as the source, and the service then sends the victim 32-byte answers. The factor
+is small (1.6) compared with DNS or NTP amplification, but it is not zero, and the relay's bandwidth becomes part of someone else's
+attack. What is done: the smallest possible answer; **per-source and global rate limits at the host firewall**
+(`firewall/stun-ratelimit.nft`: 100 packets/s per IPv4 address or IPv6 /64 with a burst of 200, 5000 packets/s in total; measured
+on a local Docker run: of 1500 packets sent in one burst, 200 were let through and 1300 dropped; it also limits what a forged source
+can make the service send to one victim to about 3 KB/s). What is NOT solved: many spoofed victims at once (each gets its own small
+budget); a forged source can use up a real client's budget for a moment (the browser retries, the request may be lost); a large flood
+of packets still reaches the host's network card before any rule (volume attacks are the provider's job, section 10.5 point 5);
+nothing checks that a source address is real. The limits are guesses (**UNCERTAIN**), and no load test was run. If you see abuse,
+lower the numbers in `firewall/stun-ratelimit.nft` or stop the service (`docker compose stop stun`): the relay keeps working,
+connections then rely on the devices' own STUN fallbacks, if any, or on the same network.
+
+Rate limit with ufw: ufw cannot filter a Docker-published port, so load `firewall/stun-ratelimit.nft` (own nft table, works next
+to ufw). It is lost at reboot unless you make it permanent (**UNCERTAIN**, depends on the distribution; the note in `firewall/nftables.conf`
+applies). With provider-level firewalls: allow UDP 3478 inbound there too.
+
+Checks by hand:
+
+```sh
+scripts/check-stun.sh                                            # starts the pinned image with config/stun.conf on loopback and tests it
+python3 -I scripts/stun-check.py --host relay.cometcast.de       # from any machine: binding, allocate refused, garbage ignored
+docker compose logs stun | grep -E 'ERROR|Bad configuration'     # must print nothing
+```
+
+Not tested: the answer for a client behind a real NAT or from the internet (the local run reported the Docker bridge gateway as the
+client address because the request came from the same machine); IPv6; load; Docker's behaviour for UDP port publishing on a real VPS
+(with the normal iptables NAT it keeps the client's source address, which STUN needs; a userland proxy would replace it, as for IPv6).
+
 ## 11. Troubleshooting
 
 | Symptom | Cause and fix |
@@ -401,6 +477,11 @@ manipulated signalling channel (for example by checking DTLS fingerprints out of
 | `caddy-init` or `caddy` cannot write `/data` | The volume is owned by someone else: `docker compose up -d --force-recreate caddy-init caddy`. |
 | Port 80/443 already in use | Another web server on the host: stop or remove it; `bootstrap.sh` checks this. |
 | `docker compose` complains about `COMETCAST_VERSION` | `.env` is missing or run from another folder. |
+| Server exits with code 2, message about an unknown key `stun` | The server image is older than the `[stun]` support. Use a newer `COMETCAST_VERSION` (section 1). |
+| `verify.sh`: `GET /ice-servers -> 404` | `[stun]` missing in `config/relay.toml` (or the restart after editing was forgotten), or a Caddyfile without `/ice-servers` in the path list. |
+| `verify.sh`: STUN `no answer ... within 3 s` | UDP 3478 blocked (provider firewall, host firewall, `STUN_PORT` mismatch), the `stun` container is down (`docker compose ps`), or you are on a network that blocks UDP (`--no-udp`). |
+| `verify.sh`: STUN `you are 172.x...` from another machine | Docker replaced the client address (a userland proxy is in the path, for example for IPv6 or a local test). STUN then reports the wrong address: browsers get useless candidates. Publish IPv4 only and check `docker compose ps` for `docker-proxy`. **UNCERTAIN: not seen on a real host.** |
+| `stun` container stops at start | `docker compose logs stun`: a coturn option this version does not know (`ERROR`, `Bad configuration format`), or the config file is unreadable. Run `scripts/check-stun.sh`. |
 
 ## 12. What was tested, and what was not
 
@@ -418,6 +499,18 @@ from the product repository's `deploy/Dockerfile` (commit `ef684e23`), Caddy 2.1
   command ran.
 - The server image started with the `internal/config/server.example.toml` settings (without TLS).
 
+STUN service (added later, also local, 2026-11-07, Docker 29.9.2, coturn 4.18.0 by digest, server image built from the product branch `open-stun` with the
+`[stun]` change because no release contains it): `docker compose config`, `scripts/lint-config.sh` (with eleven mutated copies: each broken STUN setting was caught),
+`scripts/check-stun.sh`, `shellcheck`, `yamllint`, `caddy validate`/`fmt` with `/ice-servers` passed through, `nft -c` on both firewall files. Full stack started with
+`scripts/up.sh` (3 long-running containers healthy, the stun container read-only, user `nobody`, effective capabilities none, 128 MiB and 256 pids and 0.5 CPU applied).
+`scripts/verify.sh --ip 127.0.0.1 --cacert ... --min-days 0`: 22 of 22 passed, including `/ice-servers` (STUN only, no credentials, CORS) and the UDP checks
+(Binding success, 32 bytes for 20, Allocate ignored, garbage ignored). `turnutils_uclient` with made-up credentials got **no allocation** from the STUN service, and got a
+relay address from a normal coturn started for comparison (positive control); `stun-check.py` failed that normal server on the Allocate check, as it should. A burst
+of 30 000 Binding requests left the service healthy at about 8 MiB. `firewall/stun-ratelimit.nft` was loaded: of 1500 packets sent in one burst through Docker's
+published port 200 passed and 1300 were dropped (counter), and the same in an isolated network namespace (3000 sent, 3000 received without the rules, 200 with them);
+the table was removed afterwards. **Not run (STUN):** a request from outside (the answer showed the Docker bridge address because the request came from the
+same machine); a real browser connection across two networks; IPv6; real load; `bootstrap.sh`'s new UDP port check (the test container has no `ss`); a permanent nftables setup; `ufw.sh --apply`.
+
 **Not run (UNCERTAIN):** a real VPS; a real public certificate from Let's Encrypt and its renewal; the real DNS names;
 the real GitHub Pages web app against the relay, from two browsers; IPv6; which client address Caddy sees for remote clients through Docker's
 port publishing; `ufw.sh --apply` and a permanent nftables setup; `bootstrap.sh` on a real Debian/Ubuntu VPS (it ran only in the test container);
@@ -428,9 +521,10 @@ the GitHub URL; the `internal/` profile on a real network; the CI workflow on Gi
 
 1. **Hosting provider and region** (and whether the provider offers DDoS protection and a provider-side firewall); instance size.
 2. **DNS provider and registrar steps:** the A record for `relay.cometcast.de` at the DNS provider of `cometcast.de`; an AAAA record only after IPv6 was tried.
-3. **STUN for the public relay.** The open-mode server hands out no ICE servers at all. Without STUN or TURN, connections work only between devices
-   that can reach each other directly. Options: accept that (the web app text says so), or decide on public STUN servers configured in the clients, or run
-   a separate STUN-only service (not designed, not part of this repository), or change the server (product repository).
+3. **STUN for the public relay: decided** (by the project lead on the owner's behalf, product concept "direct WebRTC first, then internal server, then the
+   receiver's own Wi-Fi"): the open-mode server lists a STUN server at `/ice-servers` (`[stun]`, product repository) and this repository runs it (section 10.9, no
+   third party). TURN stays internal-only. Still the owner's: whether UDP 3478 on this host and the reflection risk of section 10.9 are acceptable, the privacy
+   notice (the browser contacts this host for STUN), and the first server release that contains `[stun]`.
 4. **Access log and privacy notice:** whether Caddy logs client addresses (off by default), for how long, and the matching privacy page on the web site.
 5. **Who gets notified** by the monitor, and who may log in to the host.
 6. **The first image version** to run (no release exists yet), and whether to also verify digests against release notes.
