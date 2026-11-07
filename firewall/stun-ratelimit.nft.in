@@ -1,14 +1,19 @@
 #!/usr/sbin/nft -f
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Per-source rate limit for the public STUN service (UDP 3478), as a table of its own: it works next to ufw
-# or firewall/nftables.conf and never touches Docker's tables or any other rule.
-# Check without applying:  nft -c -f firewall/stun-ratelimit.nft      (as root)
-# Apply:                   nft -f firewall/stun-ratelimit.nft         (as root; replaces only this table)
+# TEMPLATE of the per-source rate limit for the public STUN service (UDP @STUN_PORT@), as a table of its own: it
+# works next to ufw or the generated nftables.conf and never touches Docker's tables or any other rule.
+# firewall/gen-nftables.sh fills in @STUN_PORT@ (STUN_PORT from .env, default 3478) and writes
+# firewall/generated/stun-ratelimit.nft; load that file, not this one:
+#   sudo nft -c -f firewall/generated/stun-ratelimit.nft   (check without applying)
+#   sudo nft -f firewall/generated/stun-ratelimit.nft      (apply; replaces only this table)
 # Remove:                  nft delete table inet cometcast_stun
 # Permanent: UNCERTAIN, depends on the distribution (for example an include line in /etc/nftables.conf, see the
-# note in nftables.conf). Rules are lost at reboot otherwise.
-# Change `3478` in the three rules if you publish another port (STUN_PORT in .env).
+# note in nftables.conf.in). Rules are lost at reboot otherwise.
+#
+# Why there is NO `notrack` here (tested, docs/SETUP.md 10.9): Docker publishes the port with DNAT, which needs
+# connection tracking. With `udp dport @STUN_PORT@ notrack` the packet skips the NAT table, reaches Docker's userland
+# proxy instead, and the STUN answer then names the Docker bridge address (172.x) instead of the client's.
 #
 # Why prerouting at priority raw: Docker publishes the port with NAT, so the packets are FORWARDED, not input:
 # ufw rules and an input chain never see them. The raw hook runs before connection tracking and before
@@ -18,19 +23,29 @@ table inet cometcast_stun
 flush table inet cometcast_stun
 
 table inet cometcast_stun {
-	# STUN reflection/amplification brake (docs/SETUP.md "STUN service"). A STUN Binding answer is small
-	# (32 bytes for a 20 byte request) but UDP sources can be forged, so an attacker could make the
-	# service send answers to a victim. Per source address (the victim's, when forged) and in total:
-	#   - per IPv4 address, or per IPv6 /64: at most 100 packets/s, burst 200
-	#   - all sources together: at most 5000 packets/s (protects the VPS itself)
-	# Residual: a forged source can use up a real client's budget for a moment (that client's STUN
-	# request is then dropped and it retries), and the global ceiling can be used up by a flood.
-	# UNCERTAIN: all numbers are guesses, never load-tested.
+	# STUN reflection/amplification brake and conntrack protection (docs/SETUP.md 10.9 has the arithmetic).
+	# A STUN Binding answer is small (32 bytes for a 20 byte request) but UDP sources can be forged, so an
+	# attacker could make the service send answers to a victim. Docker's NAT needs one connection-tracking
+	# entry per distinct client address+port that passes this chain, and an entry lives 30 s after one
+	# request/answer pair, up to 120 s when the same source port sends again after 2 s. So every packet that
+	# is let through can cost up to 60 entries per packet/s of sustained load. Limits:
+	#   - per IPv4 address, or per IPv6 /64: at most 20 packets/s, burst 40  (one source: at most 1200 entries)
+	#   - all sources together: at most 200 packets/s, burst 200             (all sources: at most 12000 entries)
+	# 12000 entries stay below half of the smallest usual nf_conntrack_max (32768 on a 1 GiB VPS: RAM/16384/2),
+	# so a flood of forged sources cannot fill the table that Caddy's connections and Docker's NAT also use.
+	# The meters are bounded (size 65535 addresses each). When a meter is full (more than 65535 distinct
+	# sources inside 60 s), a new source is not limited per address, only by the global ceiling.
+	# Residual: a forged source can use up a real client's budget for a moment (that client's STUN request is
+	# then dropped and the browser retries), and the global ceiling can be used up by a flood: STUN then fails
+	# for everybody while the relay's HTTPS keeps working. A school or office behind one address shares the
+	# per-address budget. If your host has a bigger table (sysctl net.netfilter.nf_conntrack_max), you can
+	# raise the numbers: global = nf_conntrack_max / 2 / 60 packets/s.
+	# UNCERTAIN: the numbers follow from the arithmetic above, never from a load test against real users.
 	chain stun_ratelimit {
 		type filter hook prerouting priority raw; policy accept;
 
-		udp dport 3478 meter stun_v4 { ip saddr timeout 60s limit rate over 100/second burst 200 packets } drop
-		udp dport 3478 meter stun_v6 { ip6 saddr and ffff:ffff:ffff:ffff:: timeout 60s limit rate over 100/second burst 200 packets } drop
-		udp dport 3478 limit rate over 5000/second burst 5000 packets drop
+		udp dport @STUN_PORT@ meter stun_v4 size 65535 { ip saddr timeout 60s limit rate over 20/second burst 40 packets } drop
+		udp dport @STUN_PORT@ meter stun_v6 size 65535 { ip6 saddr and ffff:ffff:ffff:ffff:: timeout 60s limit rate over 20/second burst 40 packets } drop
+		udp dport @STUN_PORT@ limit rate over 200/second burst 200 packets drop
 	}
 }

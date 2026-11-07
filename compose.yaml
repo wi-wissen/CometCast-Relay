@@ -29,8 +29,10 @@ x-logging: &logging
 
 services:
   cometcast-server:
-    # Exact release tag from .env (COMETCAST_VERSION). "latest" is deliberately not used.
-    image: ghcr.io/wi-wissen/cometcast-server:${COMETCAST_VERSION:?set COMETCAST_VERSION in .env (see .env.example)}
+    # Exact release tag from .env (COMETCAST_VERSION). "latest" is deliberately not used. When
+    # COMETCAST_IMAGE_DIGEST is set (scripts/update.sh and up.sh write it from .state/image-lock), the
+    # image is pinned by digest too: a tag that is moved in the registry later changes nothing here.
+    image: ghcr.io/wi-wissen/cometcast-server:${COMETCAST_VERSION:?set COMETCAST_VERSION in .env (see .env.example)}${COMETCAST_IMAGE_DIGEST:+@${COMETCAST_IMAGE_DIGEST}}
     restart: unless-stopped
     networks: [backend]
     volumes:
@@ -39,7 +41,10 @@ services:
       - altcha_secret
     environment:
       # The image presets COMETCAST_WEB_DIR to the bundled web app. The public relay does not
-      # serve it (the web app lives on GitHub Pages), so unset it.
+      # serve it (the web app lives on GitHub Pages). Compose cannot unset a variable of the image;
+      # an EMPTY value is what switches the directory off, and only servers from MIN_SERVER_VERSION on
+      # read an empty value as "no web directory" (older ones would try to serve a folder named "").
+      # scripts/verify.sh asks the server directly (not through Caddy) and expects 404 for "/".
       COMETCAST_WEB_DIR: ""
     # Image runs as UID 65532 already. Nothing to write, no rights needed.
     read_only: true
@@ -153,7 +158,9 @@ services:
     stop_grace_period: 5s
     logging: *logging
     healthcheck:
-      # A real STUN Binding request over UDP to the service itself (exit 0 when answered).
+      # A real STUN Binding request over UDP to the service itself. turnutils_stunclient exits 1 with
+      # "STUN receive timeout" when nothing answers (tested on 4.18.0: nothing listening, and a silent
+      # UDP socket that drops the packet), 0 when answered.
       test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
       interval: 30s
       timeout: 10s

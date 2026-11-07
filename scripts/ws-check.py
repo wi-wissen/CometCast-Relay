@@ -19,6 +19,7 @@ import socket
 import ssl
 import struct
 import sys
+import time
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -28,14 +29,27 @@ def fail(msg):
     sys.exit(1)
 
 
-def read_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+class Stream:
+    """A socket plus the bytes that were read past the end of the HTTP handshake (a server may send its
+    first frame in the same TCP segment as the 101 answer; dropping or rejecting them made the check flaky)."""
+
+    def __init__(self, sock, pending=b""):
+        self.sock = sock
+        self.pending = bytearray(pending)
+
+    def sendall(self, data):
+        self.sock.sendall(data)
+
+
+def read_exact(stream, n):
+    while len(stream.pending) < n:
+        chunk = stream.sock.recv(max(4096, n - len(stream.pending)))
         if not chunk:
             raise ConnectionError("connection closed")
-        buf += chunk
-    return buf
+        stream.pending += chunk
+    data = bytes(stream.pending[:n])
+    del stream.pending[:n]
+    return data
 
 
 def send_text(sock, text):
@@ -88,39 +102,51 @@ def main():
     a = p.parse_args()
 
     ctx = ssl.create_default_context(cafile=a.cafile)
-    try:
-        raw = socket.create_connection((a.connect or a.host, a.port), timeout=a.timeout)
-        sock = ctx.wrap_socket(raw, server_hostname=a.host)
-    except (OSError, ssl.SSLError) as e:
-        fail("TLS connection failed: %s" % e)
-    sock.settimeout(a.timeout)
+    # The server allows 30 new connections per minute and address in open mode; a 429 on the handshake (several
+    # verify.sh runs close together) is waited out, up to three times, instead of failing the check.
+    for attempt in range(4):
+        try:
+            raw = socket.create_connection((a.connect or a.host, a.port), timeout=a.timeout)
+            sock = ctx.wrap_socket(raw, server_hostname=a.host)
+        except (OSError, ssl.SSLError) as e:
+            fail("TLS connection failed: %s" % e)
+        sock.settimeout(a.timeout)
 
-    key = base64.b64encode(os.urandom(16)).decode()
-    lines = [
-        "GET /ws HTTP/1.1",
-        "Host: " + a.host,
-        "Upgrade: websocket",
-        "Connection: Upgrade",
-        "Sec-WebSocket-Key: " + key,
-        "Sec-WebSocket-Version: 13",
-    ]
-    if a.origin:
-        lines.append("Origin: " + a.origin)
-    sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+        key = base64.b64encode(os.urandom(16)).decode()
+        lines = [
+            "GET /ws HTTP/1.1",
+            "Host: " + a.host,
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            "Sec-WebSocket-Key: " + key,
+            "Sec-WebSocket-Version: 13",
+        ]
+        if a.origin:
+            lines.append("Origin: " + a.origin)
+        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
 
-    head = b""
-    try:
-        while b"\r\n\r\n" not in head:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            head += chunk
-    except OSError as e:
-        fail("no answer to the handshake: %s" % e)
-    head_text, _, rest = head.partition(b"\r\n\r\n")
-    status_line = head_text.split(b"\r\n", 1)[0].decode(errors="replace")
-    parts = status_line.split(" ", 2)
-    code = parts[1] if len(parts) > 1 else "?"
+        head = b""
+        try:
+            while b"\r\n\r\n" not in head:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+        except OSError as e:
+            fail("no answer to the handshake: %s" % e)
+        head_text, _, rest = head.partition(b"\r\n\r\n")
+        status_line = head_text.split(b"\r\n", 1)[0].decode(errors="replace")
+        parts = status_line.split(" ", 2)
+        code = parts[1] if len(parts) > 1 else "?"
+        if code != "429" or attempt == 3:
+            break
+        wait = 2.0
+        for line in head_text.decode(errors="replace").split("\r\n")[1:]:
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "retry-after" and value.strip().isdigit():
+                wait = min(float(value.strip()), 10.0)
+        sock.close()
+        time.sleep(wait)
 
     if a.mode == "reject":
         if code == "403":
@@ -133,16 +159,15 @@ def main():
     expected = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
     if ("sec-websocket-accept: " + expected).lower() not in head_text.decode(errors="replace").lower():
         fail("handshake: wrong or missing Sec-WebSocket-Accept")
-    if rest:
-        fail("unexpected data right after the handshake")
+    stream = Stream(sock, rest)
 
     try:
-        send_text(sock, json.dumps({"type": "hello", "proto_version": a.proto_version, "role": "receiver"}))
-        msg = json.loads(recv_text(sock))
+        send_text(stream, json.dumps({"type": "hello", "proto_version": a.proto_version, "role": "receiver"}))
+        msg = json.loads(recv_text(stream))
         if msg.get("type") != "hello":
             fail("expected hello, got %s" % json.dumps(msg))
-        send_text(sock, json.dumps({"type": "create_room"}))
-        msg = json.loads(recv_text(sock))
+        send_text(stream, json.dumps({"type": "create_room"}))
+        msg = json.loads(recv_text(stream))
     except (OSError, ConnectionError, ValueError) as e:
         fail("WebSocket exchange failed: %s" % e)
     if msg.get("type") == "error" and msg.get("code") == "altcha_required":
