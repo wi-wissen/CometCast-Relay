@@ -1,22 +1,22 @@
 #!/usr/sbin/nft -f
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Host firewall for the relay with nftables (alternative to firewall/ufw.sh; use one of them).
+# TEMPLATE of the host firewall for the relay with nftables (alternative to firewall/ufw.sh; use one of them).
+# Do not edit the ports here and do not load this file: firewall/gen-nftables.sh fills in @SSH_PORTS@ (detected from
+# sshd, or given) and @STUN_PORT@ and writes firewall/generated/nftables.conf, which is the file to check and load:
+#   firewall/gen-nftables.sh                         (writes firewall/generated/, prints what it detected)
+#   sudo nft -c -f firewall/generated/nftables.conf  (check without applying)
+#   sudo nft -f firewall/generated/nftables.conf     (apply; keep a second SSH session open)
 # Own table only: it never flushes the whole ruleset, so Docker's tables stay untouched.
-# Check without applying:  nft -c -f firewall/nftables.conf      (as root)
-# Apply:                   nft -f firewall/nftables.conf         (as root; keep a second SSH session open)
 # Docker note: published container ports (80, 443, 3478/udp) are forwarded, not input, so the "input" chain
 # below does not filter them; it protects the host's own services. The per-source rate limit for the published
-# STUN port is a separate file, firewall/stun-ratelimit.nft (prerouting, before Docker's NAT); load it too, with
-# ufw as well as with this file. Blocking source addresses for 80/443 needs Caddy's block list or the
+# STUN port is a separate file, firewall/stun-ratelimit.nft.in (generated the same way; prerouting, before Docker's NAT);
+# load it too, with ufw as well as with this file. Blocking source addresses for 80/443 needs Caddy's block list or the
 # DOCKER-USER chain (docs/SETUP.md "Abuse handling").
 # Make it permanent: UNCERTAIN, depends on the distribution. On Debian: add
 #   include "/etc/nftables-cometcast.conf"
-# to /etc/nftables.conf AFTER removing "flush ruleset" there (it would delete Docker's rules), copy this file to
-# that path and `systemctl enable nftables`.
-#
-# SSH is assumed on port 22: change both `22` below if not. STUN is assumed on UDP 3478 (STUN_PORT in .env):
-# change the `3478` below (and in stun-ratelimit.nft) if you publish another port.
+# to /etc/nftables.conf AFTER removing "flush ruleset" there (it would delete Docker's rules), copy the generated file
+# to that path and `systemctl enable nftables`.
 
 table inet cometcast_host
 flush table inet cometcast_host
@@ -33,14 +33,24 @@ table inet cometcast_host {
 		ip protocol icmp accept
 		meta l4proto ipv6-icmp accept
 
-		# SSH, new connections rate limited
-		tcp dport 22 ct state new limit rate 30/minute burst 10 packets accept
+		# DHCP (a client renewing its lease on the provider's network) and DHCPv6; without these a host that gets its
+		# address by DHCP can lose it when the lease runs out. (ufw's built-in rules allow them already.)
+		meta nfproto ipv4 udp sport 67 udp dport 68 accept
+		meta nfproto ipv6 ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+
+		# SSH. New connections are limited PER SOURCE (IPv4 address, IPv6 /64) and generously: 120 per minute with a
+		# burst of 60, enough for scripted logins (ansible, deploy scripts that open a session per command). The
+		# protection against password guessing is key-only SSH (docs/SETUP.md section 3, step 2), not this limit. An attacker
+		# cannot use up the budget of an administrator on another address.
+		tcp dport { @SSH_PORTS@ } ct state new meter ssh_v4 size 65535 { ip saddr timeout 60s limit rate over 120/minute burst 60 packets } drop
+		tcp dport { @SSH_PORTS@ } ct state new meter ssh_v6 size 65535 { ip6 saddr and ffff:ffff:ffff:ffff:: timeout 60s limit rate over 120/minute burst 60 packets } drop
+		tcp dport { @SSH_PORTS@ } accept
 
 		# HTTP (certificate requests, redirect) and HTTPS/WSS
 		tcp dport { 80, 443 } accept
 
 		# STUN (UDP only). Docker forwards the published port, so this rule matters only if the STUN
 		# server ever runs as a host process; it is here so that a host install is not blocked.
-		udp dport 3478 accept
+		udp dport @STUN_PORT@ accept
 	}
 }
