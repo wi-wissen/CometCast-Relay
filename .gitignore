@@ -13,4 +13,5 @@ internal/config/server.toml
 # Local state of the scripts (version history) and operator block list (IP addresses)
 .state/
 config/caddy.d/*.caddy
+!config/caddy.d/00-default.caddy
 __pycache__/

@@ -1,0 +1,2 @@
+# Intentionally empty: Caddy imports every *.caddy file in this folder inside the site block (Caddyfile).
+# Put your own rules into blocklist.caddy (see blocklist.caddy.example); that file is not committed.
