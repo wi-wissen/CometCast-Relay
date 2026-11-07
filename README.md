@@ -11,7 +11,7 @@ own relay: change the domain, the web origin and the version.
 
 | Repository | Holds |
 | --- | --- |
-| [wi-wissen/CometCast](https://github.com/wi-wissen/CometCast) | The code (`cometcast-server`), the Docker image build (`deploy/Dockerfile`), the server documentation and the generic deployment files. Releases push `ghcr.io/wi-wissen/cometcast-server:<version>`. |
+| [wi-wissen/CometCast](https://github.com/wi-wissen/CometCast) | The code (`cometcast-server`), the Docker image build (`deploy/Dockerfile`), the server documentation and the generic deployment files. Releases push `ghcr.io/wi-wissen/cometcast-server:<version>`; the manual workflow `docker-image.yml` pushes `:edge`. **No image has been published yet** (both workflows never ran), so `scripts/up.sh` cannot pull one until the first run. |
 | this repository | How to run that image as a public relay: Compose stack with Caddy (automatic TLS), the relay configuration, firewall files, scripts for setup checks, secrets, start, update, rollback and verification, and the runbook. It does **not** build the image. |
 
 Source of truth for server behaviour and settings: the product repository's `docs/server.md` and
