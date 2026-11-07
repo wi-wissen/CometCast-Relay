@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Static checks for the relay operating package. Nothing here deploys anything or needs a secret.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (our scripts)
+        run: shellcheck -x -P SCRIPTDIR scripts/*.sh firewall/ufw.sh
+
+      - name: bash syntax
+        run: |
+          for f in scripts/*.sh firewall/ufw.sh; do bash -n "$f"; done
+
+      - name: python syntax
+        run: python3 -I -m py_compile scripts/ws-check.py
+
+      - name: yamllint
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet yamllint==1.35.1
+          "$RUNNER_TEMP/venv/bin/yamllint" -c .yamllint.yaml compose.yaml internal/compose.yaml .github/workflows .yamllint.yaml
+
+      - name: config consistency (mode, origins, trusted proxy, no TURN)
+        run: scripts/lint-config.sh
+
+      - name: docker compose config (public relay)
+        run: |
+          cp .env.example .env
+          mkdir -p secrets
+          echo 0123456789abcdef0123456789abcdef > secrets/altcha_secret
+          docker compose config --quiet
+
+      - name: docker compose config (internal profile)
+        working-directory: internal
+        run: |
+          cp .env.example .env
+          mkdir -p secrets
+          echo 0123456789abcdef0123456789abcdef > secrets/turn_secret
+          echo 0123456789abcdef0123456789abcdef > secrets/altcha_secret
+          docker compose config --quiet
+
+      - name: Caddyfile (validate and format, with the image from compose.yaml)
+        run: scripts/check-caddyfile.sh
+
+      - name: internal profile, vendored files match the recorded checksums
+        run: |
+          cd internal
+          sed -n 's/^  \([0-9a-f]\{64\}  .*\)$/\1/p' PRODUCT_COMMIT | sha256sum --check --strict
+
+      - name: internal profile, coturn render tests (vendored from the product repository)
+        run: sh internal/coturn/test-render.sh
