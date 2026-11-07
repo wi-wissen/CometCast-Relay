@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Pass/fail checks of a running relay. Run it on the host after every start and update, and from
+# another machine (--no-compose) as a simple outside check. Exit code 0 = all passed, 1 = something failed.
+#
+# Usage: scripts/verify.sh [options]
+#   --domain NAME     relay host name (default: RELAY_DOMAIN from .env, else relay.cometcast.de)
+#   --origin URL      browser origin to test CORS with (default: first allowed_origins entry of config/relay.toml)
+#   --ip ADDR         connect to this address instead of resolving the name (tests before DNS is switched, or a local run)
+#   --port N          HTTPS port (default: HTTPS_PORT from .env, else 443)
+#   --http-port N     HTTP port for the redirect check (default: HTTP_PORT from .env, else 80)
+#   --cacert FILE     CA certificate to trust (local tests with a private CA)
+#   --min-days N      the certificate must be valid for at least N more days (default 14)
+#   --no-compose      skip the docker compose checks (use when run from another machine)
+#   --quiet-header    do not print the heading (used by update.sh)
+set -euo pipefail
+# shellcheck source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+domain=
+origin=
+ip=
+port=443
+http_port=80
+cacert=
+min_days=14
+use_compose=1
+header=1
+while [ $# -gt 0 ]; do
+  case $1 in
+    --domain | --origin | --ip | --port | --http-port | --cacert | --min-days)
+      [ $# -ge 2 ] || die "$1 needs a value"
+      case $1 in
+        --domain) domain=$2 ;;
+        --origin) origin=$2 ;;
+        --ip) ip=$2 ;;
+        --port) port=$2 ;;
+        --http-port) http_port=$2 ;;
+        --cacert) cacert=$2 ;;
+        --min-days) min_days=$2 ;;
+      esac
+      shift
+      ;;
+    --no-compose) use_compose=0 ;;
+    --quiet-header) header=0 ;;
+    -h | --help)
+      sed -n '2,17p' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+# Defaults from .env (the host side of the published ports), so a non-standard setup needs no flags.
+if [ "$port" = 443 ] && [ -n "$(env_get HTTPS_PORT)" ]; then port=$(env_get HTTPS_PORT); fi
+if [ "$http_port" = 80 ] && [ -n "$(env_get HTTP_PORT)" ]; then http_port=$(env_get HTTP_PORT); fi
+if [ -z "$ip" ] && [ "$use_compose" -eq 1 ] && [ -n "$(env_get BIND_ADDR)" ] && [ "$(env_get BIND_ADDR)" != 0.0.0.0 ]; then
+  ip=$(env_get BIND_ADDR)
+fi
+[ -n "$domain" ] || domain=$(env_get RELAY_DOMAIN)
+[ -n "$domain" ] || domain=relay.cometcast.de
+if [ -z "$origin" ] && [ -f "$ROOT/config/relay.toml" ]; then
+  origin=$(sed -e 's/[[:space:]]*#.*$//' "$ROOT/config/relay.toml" | grep -E '^allowed_origins' | grep -oE 'https?://[^"]+' | head -n 1 || true)
+fi
+[ -n "$origin" ] || die "no --origin given and none found in config/relay.toml"
+[[ $port =~ ^[0-9]+$ && $http_port =~ ^[0-9]+$ && $min_days =~ ^[0-9]+$ ]] || die "ports and --min-days must be numbers"
+need_cmd curl
+need_cmd python3
+
+bad_origin=https://not-allowed.invalid
+base=https://$domain
+[ "$port" = 443 ] || base=$base:$port
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+curl_args=(-sS --max-time 15 --proto '=https,http')
+[ -z "$cacert" ] || curl_args+=(--cacert "$cacert")
+[ -z "$ip" ] || curl_args+=(--resolve "$domain:$port:$ip" --resolve "$domain:$http_port:$ip")
+
+# req NAME [curl args...] URL: stores status in $tmp/NAME.code, headers in NAME.h, body in NAME.b
+req() {
+  local name=$1
+  shift
+  local code
+  if code=$(curl "${curl_args[@]}" -o "$tmp/$name.b" -D "$tmp/$name.h" -w '%{http_code}' "$@" 2>"$tmp/$name.err"); then
+    printf '%s' "$code" >"$tmp/$name.code"
+  else
+    printf '000' >"$tmp/$name.code"
+  fi
+}
+code_of() { cat "$tmp/$1.code"; }
+# header NAME HEADER: value of a response header (case-insensitive), without CR
+header_of() { grep -i "^$2:" "$tmp/$1.h" 2>/dev/null | head -n 1 | cut -d: -f2- | tr -d '\r' | sed -e 's/^[[:space:]]*//' || true; }
+
+if [ "$header" -eq 1 ]; then
+  info "Verifying $base (origin for CORS tests: $origin)${ip:+, connecting to $ip}"
+fi
+
+# 1. containers
+if [ "$use_compose" -eq 1 ]; then
+  if have_cmd docker && docker compose version >/dev/null 2>&1 && [ -f "$ROOT/.env" ]; then
+    for svc in cometcast-server caddy; do
+      state=$(compose ps --format '{{.Health}}' "$svc" 2>/dev/null | head -n 1 || true)
+      if [ "$state" = healthy ]; then
+        ok "container $svc is healthy"
+      else
+        fail "container $svc is not healthy (state: ${state:-not running}); docker compose ps, docker compose logs $svc"
+      fi
+    done
+  else
+    warn "docker compose not usable here: container checks skipped"
+  fi
+fi
+
+# 2. TLS certificate
+if have_cmd openssl; then
+  host_for_tls=${ip:-$domain}
+  ossl=(openssl s_client -connect "$host_for_tls:$port" -servername "$domain" -verify_return_error)
+  [ -z "$cacert" ] || ossl+=(-CAfile "$cacert")
+  if "${ossl[@]}" </dev/null >"$tmp/tls.out" 2>"$tmp/tls.err"; then
+    ok "TLS: certificate for $domain verifies"
+    if openssl x509 -noout -checkend $((min_days * 86400)) <"$tmp/tls.out" >/dev/null 2>&1; then
+      ok "TLS: certificate valid for at least $min_days more days"
+    else
+      fail "TLS: certificate expires within $min_days days (Caddy should renew it; docker compose logs caddy)"
+    fi
+  else
+    fail "TLS: handshake or certificate verification failed ($(grep -m1 -i 'verify error\|error' "$tmp/tls.err" "$tmp/tls.out" 2>/dev/null | head -n 1 | cut -c1-150))"
+  fi
+else
+  warn "openssl missing: certificate not checked separately"
+fi
+
+# 3. health endpoint
+req health "$base/healthz"
+if [ "$(code_of health)" = 200 ] && [ "$(tr -d '\r\n' <"$tmp/health.b")" = ok ]; then
+  ok "GET /healthz -> 200 ok"
+else
+  fail "GET /healthz -> $(code_of health) (expected 200 ok) $(head -c 150 "$tmp/health.err")"
+fi
+
+# 4. HTTP redirects to HTTPS
+req redirect --max-redirs 0 "http://$domain:$http_port/healthz"
+case $(code_of redirect) in
+  301 | 302 | 307 | 308)
+    loc=$(header_of redirect location)
+    if [[ $loc == https://$domain* ]]; then
+      ok "HTTP :$http_port redirects to HTTPS ($loc)"
+    else
+      fail "HTTP redirect goes somewhere unexpected: $loc"
+    fi
+    ;;
+  *) fail "HTTP :$http_port did not redirect (code $(code_of redirect))" ;;
+esac
+
+# 5. paths that must not exist on the public relay
+req root "$base/"
+if [ "$(code_of root)" = 404 ]; then
+  ok "GET / -> 404 (the bundled web app is not exposed)"
+else
+  fail "GET / -> $(code_of root) (expected 404; is the Caddyfile path allowlist in place?)"
+fi
+req ice "$base/ice-servers"
+if [ "$(code_of ice)" = 404 ]; then
+  ok "GET /ice-servers -> 404 (no TURN on the public relay)"
+else
+  fail "GET /ice-servers -> $(code_of ice) (expected 404)"
+fi
+
+# 6. ALTCHA challenge, with CORS
+req altcha -H "Origin: $origin" "$base/altcha/challenge"
+if [ "$(code_of altcha)" = 200 ] && grep -q '"parameters"' "$tmp/altcha.b" && grep -q '"signature"' "$tmp/altcha.b"; then
+  ok "GET /altcha/challenge -> 200 with parameters and signature"
+else
+  fail "GET /altcha/challenge -> $(code_of altcha) without a puzzle: $(head -c 150 "$tmp/altcha.b")"
+fi
+if [ "$(header_of altcha access-control-allow-origin)" = "$origin" ]; then
+  ok "challenge answer allows origin $origin (Access-Control-Allow-Origin)"
+else
+  fail "challenge answer lacks Access-Control-Allow-Origin: $origin (got '$(header_of altcha access-control-allow-origin)')"
+fi
+if header_of altcha cache-control | grep -qi no-store; then
+  ok "challenge answer has Cache-Control: no-store"
+else
+  fail "challenge answer is missing Cache-Control: no-store"
+fi
+
+# 7. CORS preflight
+req pre_ok -X OPTIONS -H "Origin: $origin" -H 'Access-Control-Request-Method: GET' "$base/altcha/challenge"
+if [ "$(code_of pre_ok)" = 204 ] && [ "$(header_of pre_ok access-control-allow-origin)" = "$origin" ]; then
+  ok "CORS preflight from $origin -> 204 and origin allowed"
+else
+  fail "CORS preflight from $origin -> $(code_of pre_ok), allow-origin '$(header_of pre_ok access-control-allow-origin)' (expected 204 and the origin)"
+fi
+req pre_bad -X OPTIONS -H "Origin: $bad_origin" -H 'Access-Control-Request-Method: GET' "$base/altcha/challenge"
+if [ "$(code_of pre_bad)" = 403 ] && [ -z "$(header_of pre_bad access-control-allow-origin)" ]; then
+  ok "CORS preflight from a foreign origin -> 403 without allow-origin"
+else
+  fail "CORS preflight from a foreign origin -> $(code_of pre_bad), allow-origin '$(header_of pre_bad access-control-allow-origin)' (expected 403 and none)"
+fi
+
+# 8. WebSocket
+ws_args=(--host "$domain" --port "$port")
+[ -z "$ip" ] || ws_args+=(--connect "$ip")
+[ -z "$cacert" ] || ws_args+=(--cafile "$cacert")
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if out=$(python3 -I "$here/ws-check.py" "${ws_args[@]}" --origin "$origin" --mode accept 2>&1); then
+  ok "WebSocket /ws from $origin: $out"
+else
+  fail "WebSocket /ws from $origin: $out"
+fi
+if out=$(python3 -I "$here/ws-check.py" "${ws_args[@]}" --origin "$bad_origin" --mode reject 2>&1); then
+  ok "WebSocket /ws from a foreign origin: $out"
+else
+  fail "WebSocket /ws from a foreign origin: $out"
+fi
+if out=$(python3 -I "$here/ws-check.py" "${ws_args[@]}" --mode accept 2>&1); then
+  ok "WebSocket /ws without Origin (native client): $out"
+else
+  fail "WebSocket /ws without Origin (native client): $out"
+fi
+
+info
+info "Summary: $N_OK passed, $N_WARN warnings, $N_FAIL failed."
+[ "$N_FAIL" -eq 0 ]
