@@ -1,0 +1,57 @@
+# Comet Cast server: example configuration for the Docker setup in deploy/.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Copy to deploy/config/cometcast-server.toml and edit. `cometcast-server
+# --print-default-config` prints every setting with its default.
+# UNCERTAIN: all numbers are untested placeholders. Host names are examples.
+
+mode = "internal"
+# Web origins whose pages may use this relay from another site (the web app hosted as static
+# files, e.g. GitHub Pages). Exact match, no path, no wildcard. Empty/unset = same-origin only
+# for the HTTP endpoints and any browser origin on /ws. When set, /ws refuses other browser
+# origins: list the origin your users open, including this relay's own address if it serves the
+# web app too. Public (open) relays should always set this. "*" = any origin, internal mode only.
+# allowed_origins = ["https://cometcast.de"]
+
+# Join approval: the display device decides who may join a room (docs/protocol.md). Clients choose
+# the mode of their room themselves ("open" unless the person picked another); this is the mode for
+# rooms whose creator names none. To make every room ask first, uncomment both lines: clients that
+# ask for an open room are refused and the web and Flutter apps fall back to "confirm".
+# default_join_mode = "confirm"
+# allow_open_rooms = false
+# join_approval_secs = 60   # a join request waits this long for the display device
+# In a container the listen address comes from COMETCAST_LISTEN (see the Dockerfile).
+
+[tls]
+# Real certificate and key (PEM), mounted by docker-compose.yml from deploy/certs/.
+# Leave both out when a reverse proxy in front of the server does TLS.
+cert_file = "/etc/cometcast/certs/fullchain.pem"
+key_file = "/etc/cometcast/certs/privkey.pem"
+
+[network]
+# Only if a reverse proxy runs in front: its address. Then X-Forwarded-For is believed
+# from it and from nobody else. Checked in the first run: with "172.16.0.0/12" a request that
+# reached the published port from the same host (it arrived from the Docker bridge address)
+# had its X-Forwarded-For honoured (read from the right), and without the header it was refused
+# when `allow` did not contain the bridge address. Do not trust a wider range than your proxy.
+# UNCERTAIN: which source address the server sees for a REMOTE client through Docker's port
+# publishing (NAT keeps it, the userland proxy replaces it) was not tested.
+# trusted_proxies = ["172.16.0.0/12"]
+# Networks of the organisation. Empty = everybody may connect.
+# allow = ["10.0.0.0/8", "192.168.0.0/16"]
+
+[altcha]
+# "optional": only checked when the client sends a solution.
+# Use "always" to require it for create_room.
+mode = "optional"
+# Fixed secret (docker-compose.yml provides /run/secrets/altcha_secret) so puzzles survive
+# a restart and work across several server instances. At least 16 characters.
+# Always use secret_file for secrets, not --set / environment variables.
+secret_file = "/run/secrets/altcha_secret"
+
+# TURN credentials at GET /ice-servers. Secret = same value as in coturn.
+[turn]
+urls = ["turn:relay.example.org:3478?transport=udp", "turns:relay.example.org:5349?transport=tcp"]
+stun_urls = ["stun:relay.example.org:3478"]
+secret_file = "/run/secrets/turn_secret"
+ttl_secs = 3600

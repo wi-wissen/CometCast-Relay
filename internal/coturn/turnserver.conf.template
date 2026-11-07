@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# coturn configuration template for Comet Cast (internal mode, TURN REST credentials).
+# Fill in the placeholders (words between two @ signs) with ./render.sh (it reads ../.env and ../secrets/turn_secret).
+#
+# First real run (2026-11-07): coturn 4.18.0 (docker image coturn/coturn:4.18.0) read this file
+# and accepted every line (no "Bad configuration format" left); TURN REST credentials from
+# cometcast-server were accepted and a UDP relay allocation worked (docs/server.md, "First real
+# run"). Lines still marked UNCERTAIN were not checked by that run. Other coturn versions: run
+# `turnserver --help` and watch the start log for "Bad configuration format" or "ERROR".
+
+# ---- Ports ----
+listening-port=3478
+tls-listening-port=5349
+# UNCERTAIN: the relay port range. Narrow on purpose; open the same range in the firewall.
+min-port=@TURN_MIN_PORT@
+max-port=@TURN_MAX_PORT@
+
+# ---- Credentials: time-limited, made by cometcast-server (GET /ice-servers) ----
+# username = "<expiry unix time>:<id>", password = base64(HMAC-SHA1(secret, username)).
+use-auth-secret
+static-auth-secret=@TURN_SECRET@
+realm=@TURN_REALM@
+
+# ---- Addresses ----
+# external-ip: the address clients are told to send to. A machine with a public address: that
+# address. Behind NAT: "public/private" (TURN_EXTERNAL_IP=203.0.113.10/10.0.0.5 in .env; the
+# private half is normally the same as TURN_RELAY_IP). render.sh checks both halves. UNCERTAIN:
+# the NAT form was only rendered and read by coturn's config parser, never run behind a real NAT.
+external-ip=@TURN_EXTERNAL_IP@
+relay-ip=@TURN_RELAY_IP@
+# Optional (TURN_LISTENING_IP in .env): listen only on this local address instead of on every
+# address of the host. With host networking (docker-compose.yml) coturn would otherwise
+# open 3478/5349 on ALL host addresses.
+@TURN_LISTENING_IP_LINE@
+
+# ---- Relay hardening ----
+# No relaying to multicast addresses.
+no-multicast-peers
+# no-tcp-relay switches off ONLY the RFC 6062 TCP allocations (the relay making outgoing TCP
+# connections for the client). It does not affect TCP or TLS as the transport between a client and
+# coturn (3478/tcp, 5349/tcp stay open), and it does not stop UDP relaying. WebRTC needs only
+# UDP relaying. UNCERTAIN: remove this line if a client needs TCP allocations.
+no-tcp-relay
+# No management interface (telnet CLI): coturn 4.18 has it OFF by default and "no-cli" is
+# rejected there ("deprecated, see --cli"; found in the first run). So there is deliberately NO
+# "cli" line here; never add one. Checked in the run: nothing listens on 5766.
+# Add a fingerprint to messages (standard for WebRTC).
+fingerprint
+# RFC 5780 (NAT behaviour discovery) is OFF by default in coturn 4.18 ("no-rfc5780" is deprecated),
+# so nothing is set. TLS versions: "no-tlsv1" and "no-tlsv1_1" are not valid in 4.18.0 (logged as
+# "Bad configuration format"; `turnserver --help` there lists only "tlsv1" / "tlsv1_1" as opt-INs
+# for a lower minimum). Checked on the wire against the coturn/coturn:4.18.0 image with OpenSSL
+# 3.0.13 s_client on 5349: TLS 1.0 and 1.1 handshakes were refused (alert "protocol version"),
+# TLS 1.2 and 1.3 worked. That is one image and one client, not a TLS audit (UNCERTAIN for other
+# builds and versions). Ciphers: `cipher-list` is accepted by 4.18.0 and took effect (with the
+# line below a TLS 1.2 client got ECDHE-RSA-AES256-GCM-SHA384 and a client offering only
+# AES128-SHA was refused). It applies to TLS 1.2 and DTLS; TLS 1.3 suites stay at the library
+# default. UNCERTAIN: very old clients may not support these ciphers; WebRTC browsers do.
+cipher-list=ECDHE+AESGCM:ECDHE+CHACHA20
+# Keep the pid file where a read-only root file system still allows writing (tmpfs in compose).
+pidfile=/tmp/turnserver.pid
+
+# ---- Quotas ----
+# DoS risk: anyone who can call GET /ice-servers gets valid credentials, and every allocation
+# takes one relay port. If quotas are above the number of relay ports (the range min-port..max-port),
+# they never trigger and a few clients can use up ALL ports, so nobody else can relay.
+#  - total-quota is computed by render.sh as 80 % of the ports in the range (@TURN_TOTAL_QUOTA@),
+#    so some ports always stay free below the limit.
+#  - user-quota=24 allocations per user name. cometcast-server hands out the SAME user name to a
+#    client (IPv4 address or IPv6 /64) for a whole time bucket, so this is a per-client limit.
+#    Residual: an attacker with many addresses (a whole IPv6 /48, a botnet) still gets many user
+#    names, each with 24 allocations; the total-quota then stops the exhaustion only by refusing
+#    everybody. Firewall rate limits for 3478 are the missing part (not set up here).
+#  - max-bps (bytes/s per allocation) and bps-capacity (bytes/s for the whole server) bound the
+#    bandwidth. MEASURED with coturn 4.18.0: every allocation RESERVES max-bps out of
+#    bps-capacity, and once the capacity is used up new allocations get error 486 (quota
+#    reached). So bps-capacity / max-bps is a second cap on concurrent allocations: with the
+#    values below 125000000 / 750000 = 166 allocations (each call needs about two). Raise
+#    bps-capacity (to what the uplink can carry, in bytes/s) for a bigger server; the ports then
+#    become the limit and total-quota (80 % of the ports) takes over.
+#    750000 bytes/s = 6 Mbit/s per allocation is above "1080p is roughly 2-5 Mbit/s per stream"
+#    (not measured). A per-USER bandwidth limit exists in coturn only with a user database and
+#    is not used.
+# UNCERTAIN: all four values are untuned guesses. The user-quota and the capacity cap were tested
+# (docs/server.md, "Review fixes"); the per-allocation byte limit itself was not.
+user-quota=24
+total-quota=@TURN_TOTAL_QUOTA@
+max-bps=750000
+bps-capacity=125000000
+
+# ---- Where relayed packets may NOT go (SSRF protection) ----
+# The relay must not become a way into the server, management or router networks.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+# The next three ranges (IETF protocol assignments, benchmarking, reserved) are additions
+# that are not on the planning page.
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+# Added after a security review (not on the planning page): documentation ranges, and IPv6 forms
+# that can reach IPv4 or internal targets (IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, 6to4
+# 2002::/16, old site-local fec0::/10). Ranges are written as "first-last".
+# The IPv6 list is a best-effort list of special-purpose ranges, NOT a proof that no
+# internal target can be reached: routable IPv6 inside your own network (global addresses of your
+# servers) is not covered by any of these lines. coturn 4.18.0 accepted and listed all of them at
+# start (checked), but they were never exercised: the test relay was IPv4 only (an IPv6 peer is refused
+# for "address family mismatch" before the deny list matters), and the test host had no IPv6.
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+# NOT "denied-peer-ip=::-::" (unspecified address): in coturn 4.18.0 that line made EVERY IPv4 peer
+# refused (403), public ones too, so no call could relay at all. Found in the first run.
+denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
+denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fec0::-feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# Added after a second review: Teredo 2001::/32, discard-only 100::/64, local-use
+# NAT64 64:ff9b:1::/48 and the deprecated 6to4 relay anycast 192.88.99.0/24.
+# Added after a third review: documentation 2001:db8::/32, ORCHID 2001:10::/28, ORCHIDv2
+# 2001:20::/28, 5f00::/16 (SRv6 SIDs), 3fff::/20 (documentation, RFC 9637).
+denied-peer-ip=2001:db8::-2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=2001:10::-2001:1f:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=2001:20::-2001:2f:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=5f00::-5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=3fff::-3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff
+# NOT added: ::/96 (IPv4-compatible, "::-::ffff:ffff"). Tested with coturn 4.18.0: with that line
+# EVERY public IPv4 peer was refused (403), the same failure as "::-::" (see below). Do not add it.
+denied-peer-ip=2001::-2001:0:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=100::-100::ffff:ffff:ffff:ffff
+denied-peer-ip=64:ff9b:1::-64:ff9b:1:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=192.88.99.0-192.88.99.255
+# EXCEPTION (important): the server's own relay address must stay reachable, otherwise
+# two devices in the SAME private network cannot relay to each other, because the relay
+# addresses are themselves private. Everything else private stays denied.
+# `allowed-peer-ip` only makes exceptions, it does not deny anything by itself.
+# WARNING (host networking): in docker-compose.yml coturn runs with network_mode: host, so it
+# sits directly in the host's network. allowed-peer-ip makes THIS address reachable for every
+# relayed client, and with host networking that address is the host itself: a client with valid
+# credentials can send UDP packets (only UDP: the relay is UDP only, RFC 6062 TCP allocations are
+# off) to UDP services on that address, for example DNS, or coturn's own 3478/udp, or any other
+# UDP service listening on all addresses. TCP services (the Comet Cast server on 8443, SSH) are
+# NOT reachable through this relay. Use a relay address that carries no other UDP service (a
+# dedicated address or interface; see also listening-ip), or firewall UDP to it except 3478 and
+# the relay ports. Checked with coturn 4.18.0: a permission for this address was granted (OK), a
+# private peer (10.1.2.3) got 403, a public peer was granted.
+# UNCERTAIN: the planning page says to test this with two devices in one network.
+allowed-peer-ip=@TURN_RELAY_IP@
+
+# ---- TLS on 5349 ----
+# Certificate for the TURN host name (mounted from ../certs).
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+
+# ---- Logging ----
+# UNCERTAIN: log to the console so `docker logs` shows it.
+log-file=stdout
+simple-log

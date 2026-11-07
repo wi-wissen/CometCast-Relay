@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Comet Cast server + coturn (TURN relay) on one machine.
+#
+# First real run (2026-11-07, Docker Engine 29.9.2, Compose 5.6.1, Linux): the stack started, the
+# server container was "healthy", WebSocket room create/join worked over WSS, and coturn 4.18.0
+# accepted the TURN REST credentials of GET /ice-servers (docs/server.md, "First real run").
+# NOT run: a real network (two machines, NAT), IPv6, TLS on coturn's port 5349, a real certificate.
+#
+# Before the first start (all paths relative to this folder). The UIDs matter: the server image
+# runs as 65532, the coturn image as nobody (65534); neither runs as root.
+#   1. cp config/cometcast-server.example.toml config/cometcast-server.toml   (edit it)
+#   2. mkdir -p secrets certs
+#      openssl rand -hex 32 > secrets/turn_secret       (the shared TURN secret)
+#      openssl rand -hex 32 > secrets/altcha_secret     (signs ALTCHA puzzles)
+#      chown root:65532 secrets/*; chmod 640 secrets/*   (the server user reads them via the group)
+#   3. put fullchain.pem and privkey.pem into certs/    (never commit them)
+#      BOTH programs read the key: owner 65532 (server), group 65534 (coturn), mode 640:
+#        chown 65532:65534 certs/privkey.pem; chmod 640 certs/privkey.pem
+#      certbot makes keys readable by root only (0600). If the server cannot read the key it
+#      stops at start with a message that says so (then restarts, see restart policy). coturn does
+#      not stop: it logs a warning and starts WITHOUT TLS on 5349.
+#   4. cp .env.example .env                              (edit it)
+#   5. TURN_CONF_GROUP=65534 ./coturn/render.sh          (makes coturn/turnserver.conf, as root)
+#      The file holds the TURN secret. Without the group it is 600 and coturn cannot read it:
+#      it then starts with its defaults and the TURN relay is unusable.
+#   6. docker compose up -d --build
+#
+# Run with the repository root as build context (the Dockerfile needs the whole workspace).
+# Behind a TLS-intercepting proxy the build needs your CA:
+#   docker build --network=host --secret id=extra_ca,src=/path/ca.pem -f deploy/Dockerfile -t cometcast-server:local ..
+# (`docker compose up --build` has no such secret: UNCERTAIN whether `build.secrets` in this file
+# works the same, not tried. In the run the image was built with `docker build` as above and
+# started with `docker compose up -d` without --build.)
+#
+# Ports: the server publishes 8443/tcp on ALL host addresses (change the left side to
+# "127.0.0.1:8443:8443" if a reverse proxy on the same host is the only client). coturn uses
+# host networking: 3478 udp+tcp, 5349 tcp, relay range from .env (UDP).
+
+services:
+  cometcast-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: cometcast-server:local
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./config/cometcast-server.toml:/etc/cometcast/server.toml:ro
+      - ./certs:/etc/cometcast/certs:ro
+    secrets:
+      - turn_secret
+      - altcha_secret
+    # The container does not need to write anything or gain any rights.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Limits (UNCERTAIN: untuned guesses, not load-tested; raise them if the server is OOM-killed
+    # or cannot create threads). The server needs no tmpfs: with read_only it ran fine in the first
+    # run (it writes no files; a self-signed development certificate is made in memory).
+    mem_limit: 512m
+    pids_limit: 512
+    # The health check is defined in the Dockerfile (`cometcast-server --healthcheck`: GET /healthz
+    # on loopback inside the container; no shell or curl needed). It reads the SAME config file and
+    # COMETCAST_* environment variables as the server, but NOT the flags of a `command:` here: if you
+    # change the port, TLS or `--set` through `command:`, set the same values through `environment:`
+    # (COMETCAST_LISTEN=..., COMETCAST_TLS_*...) or override `healthcheck:` with the same flags,
+    # otherwise the check asks the wrong port or scheme and the container turns "unhealthy".
+    # Status: `docker compose ps`.
+    # `docker stop`: SIGTERM makes the server send a Close frame to every open WebSocket and stop
+    # within 5 s at the latest (open connections are given 5 s, then dropped). Measured: 0.2 s with
+    # no client connected; with live clients the integration test shows the Close frames and that
+    # run() returns in time, but `docker stop` with clients was not timed. Compose's default stop
+    # grace period is 10 s, so it stays below that.
+
+  coturn:
+    # Tested tag: 4.18.0 (exists on Docker Hub, run on 2026-11-07). Set COTURN_VERSION in .env.
+    image: coturn/coturn:${COTURN_VERSION:?set COTURN_VERSION in .env}
+    restart: unless-stopped
+    # coturn uses a whole range of UDP ports for relaying. Host networking avoids mapping
+    # hundreds of ports through Docker. Host networking only works on Linux hosts (worked in the run).
+    network_mode: host
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./certs:/etc/coturn/certs:ro
+    # The turnserver binary in the image carries a file capability (cap_net_bind_service). If that
+    # capability is missing from the container's set, exec fails with "Operation not permitted"
+    # (found in the first run). So drop everything and add back only this one.
+    # The image runs as user "nobody" (no root).
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/tmp
+    security_opt:
+      - no-new-privileges:true
+    # UNCERTAIN: untuned guesses (relay traffic does not go through user space memory much, but
+    # one thread set per CPU core plus thousands of sockets needs room).
+    mem_limit: 1g
+    pids_limit: 512
+    # Health check: a STUN binding request over UDP to coturn itself (turnutils_stunclient is in
+    # the image; nc and a shell are not needed). Exit code 0 = coturn answered, 1 = no answer.
+    # It asks TURN_LISTENING_IP when you set it in .env (coturn then listens only there), else
+    # 127.0.0.1 (coturn listens on all addresses). Tested in the review run: exit 0 against the
+    # running server, 1 against a closed port. It proves that the UDP listener answers; it does
+    # not prove TLS on 5349 or relaying.
+    healthcheck:
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "${TURN_LISTENING_IP:-127.0.0.1}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  turn_secret:
+    file: ./secrets/turn_secret
+  altcha_secret:
+    file: ./secrets/altcha_secret

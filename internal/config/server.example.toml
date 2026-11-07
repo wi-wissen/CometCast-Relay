@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# INTERNAL-mode server configuration, for the optional profile in internal/ (not the public relay).
+# Derived by hand from internal/upstream/cometcast-server.example.toml (product repository).
+# Copy to config/server.toml and edit. `cometcast-server --print-default-config` lists every setting.
+# UNCERTAIN: all numbers are untested placeholders. Host names are examples.
+
+mode = "internal"
+
+# Web origins that may use this server from another site. Not needed when the web app is served by
+# this container itself (same origin) unless you set the list; then include this server's own origin.
+# "*" is allowed in internal mode only.
+# allowed_origins = ["https://cast.example.org"]
+
+# In a container the listen address comes from COMETCAST_LISTEN (0.0.0.0:8443, set in the image).
+
+[tls]
+# Certificate and key (PEM) mounted from internal/certs/ by compose.yaml. Read once at start:
+# restart after a renewal. Remove both lines if a reverse proxy does TLS.
+cert_file = "/etc/cometcast/certs/fullchain.pem"
+key_file = "/etc/cometcast/certs/privkey.pem"
+
+[network]
+# Networks of the organisation. Empty = everybody may connect. SET THIS for an internal server.
+allow = ["10.0.0.0/8", "192.168.0.0/16"]
+# Only with a reverse proxy in front: its address (nothing wider). Without it all clients behind a
+# proxy share one address, one set of limits and one TURN user name.
+# trusted_proxies = ["172.16.0.0/12"]
+
+[altcha]
+mode = "optional"
+secret_file = "/run/secrets/altcha_secret"
+
+# TURN credentials at GET /ice-servers (internal mode only). Same secret as coturn.
+[turn]
+urls = ["turn:relay.example.org:3478?transport=udp", "turns:relay.example.org:5349?transport=tcp"]
+stun_urls = ["stun:relay.example.org:3478"]
+secret_file = "/run/secrets/turn_secret"
+ttl_secs = 3600

@@ -1,0 +1,11 @@
+# Written by scripts/sync-from-product.sh. Do not edit by hand.
+source: https://github.com/wi-wissen/CometCast (path deploy/)
+commit: ef684e2300e1cabaf61187140a48a524404c8a7d
+commit-date: 2026-11-07
+files (sha256 of the vendored copies):
+  7808bcc93b214a68d01e949222ddfc1ac8eb887559e5f715986d335af40c13ee  coturn/render.sh
+  115e820e675b790694bed2d4929b44cd6dacabeecd3815e91b860a9480eeca7e  coturn/test-render.sh
+  f3df36336a06535dadac0ce42ce89232aac9692aab10430597f10f12df6ac829  coturn/turnserver.conf.template
+  e7a0a562ea9b6b52c1d3369bb8a5b9af2f36ac772e7421a583f81e572ed5c5a7  upstream/docker-compose.yml
+  94f29a913496290a08ddc142ffe12b49f1e751eb2766179fe69e551d3450ed9d  upstream/cometcast-server.example.toml
+  354a8fd0d17827649ed1dd5cd10164376b7ad6c957e1628f072941789d9dcd50  upstream/env.example
