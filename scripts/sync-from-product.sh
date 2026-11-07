@@ -5,7 +5,10 @@
 #
 # Usage: scripts/sync-from-product.sh [--repo PATH_OR_URL] [--ref REF]
 #   --repo  a local clone, or a git URL (default: https://github.com/wi-wissen/CometCast)
-#   --ref   branch, tag or commit to take (default: main). A URL is cloned shallow into a temporary folder.
+#   --ref   tag or commit to take. Default: the commit recorded in internal/PRODUCT_COMMIT (so a plain run
+#           re-checks the files against what is recorded and never moves by itself). To update, name a release tag or a
+#           commit on purpose. A branch name (main) is accepted with a warning: it moves, and what you get is not
+#           reproducible. A URL is cloned shallow into a temporary folder.
 #
 # Vendored verbatim (used):          internal/coturn/{render.sh,test-render.sh,turnserver.conf.template}
 # Reference copies (not used as-is): internal/upstream/{docker-compose.yml,cometcast-server.example.toml,env.example}
@@ -18,7 +21,7 @@ set -euo pipefail
 need_cmd git
 
 repo=https://github.com/wi-wissen/CometCast
-ref=main
+ref=
 while [ $# -gt 0 ]; do
   case $1 in
     --repo | --ref)
@@ -27,13 +30,21 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,15p' "${BASH_SOURCE[0]}"
+      sed -n '2,18p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+
+if [ -z "$ref" ]; then
+  ref=$(sed -n 's/^commit:[[:space:]]*\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' "$ROOT/internal/PRODUCT_COMMIT" 2>/dev/null | head -n 1)
+  [ -n "$ref" ] || die "no --ref given and no commit in internal/PRODUCT_COMMIT: pass a release tag or a commit, for example --ref v0.1.0"
+  info "no --ref: using the commit recorded in internal/PRODUCT_COMMIT ($ref)"
+elif [[ $ref == main || $ref == master || $ref == origin/* || $ref == refs/heads/* || $ref == HEAD ]]; then
+  warn "'$ref' is a moving branch: the result is not reproducible. Prefer a release tag or a commit."
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

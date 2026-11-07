@@ -1,0 +1,18 @@
+# The oldest cometcast-server release that this repository's configuration works with. Read by
+# scripts/up.sh, update.sh and rollback.sh (scripts/lib.sh: min_server_version); the environment variable
+# MIN_SERVER_VERSION overrides it. One exact version (MAJOR.MINOR.PATCH[-pre]); empty = no check.
+#
+# What a server needs for this configuration:
+#   - the [stun] section of config/relay.toml: product commit 4853e19 "Add STUN support to open mode"
+#     (merged as 551e37c); older servers refuse to start ("unknown field `stun`")
+#   - an empty COMETCAST_WEB_DIR meaning "no web directory" (compose.yaml): product commit "Empty web_dir means
+#     no static files", the change after 551e37c that this value belongs to
+#   - the separate per-address bucket limits.ice_per_min for /ice-servers (older servers share limits.http_per_min
+#     with /altcha/challenge; works, but a 429 on /ice-servers is likelier)
+#
+# STATE: no release has been published yet (no tags in the product repository; the Cargo version is 0.1.0), so
+# 0.1.0 is the first version that CAN contain these changes: it must be cut from a commit that has all of
+# them. When the first release exists, check its tag against `git merge-base --is-ancestor` for those commits
+# and bump this value if 0.1.0 turned out to be cut earlier. Bump it again whenever relay.toml starts to use a
+# newer server setting.
+0.1.0

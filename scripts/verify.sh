@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Pass/fail checks of a running relay. Run it on the host after every start and update, and from
-# another machine (--no-compose) as a simple outside check. Exit code 0 = all passed, 1 = something failed.
+# another machine (--no-compose) as a simple outside check.
+# Exit code: 0 = all passed, 1 = a CORE check failed (the relay itself: containers, TLS, /healthz, ALTCHA, CORS,
+# the WebSocket handshake, the server serves no web files), 2 = only STUN checks failed (STUN container, the
+# /ice-servers list, the UDP checks). update.sh rolls back on 1 and only warns on 2.
 #
 # Usage: scripts/verify.sh [options]
 #   --domain NAME     relay host name (default: RELAY_DOMAIN from .env, else relay.cometcast.de)
@@ -13,9 +16,12 @@
 #   --min-days N      the certificate must be valid for at least N more days (default 14)
 #   --stun-host NAME  host of the STUN service (default: host of the first [stun] url from /ice-servers)
 #   --stun-port N     UDP port of the STUN service (default: port of that url; with --ip also STUN_PORT from .env)
+#   --only core|stun|all  run only the core checks, only the STUN checks, or both (default all)
 #   --no-udp          skip the UDP STUN checks (from a network that blocks UDP; the list itself is still checked)
 #   --no-compose      skip the docker compose checks (use when run from another machine)
 #   --quiet-header    do not print the heading (used by update.sh)
+# Note: the WebSocket check opens three connections; the server allows 30 new connections per minute and
+# address (open mode), so do not run verify.sh in a tight loop from one address.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -30,11 +36,12 @@ stun_host=
 stun_port=
 check_udp=1
 min_days=14
+only=all
 use_compose=1
 header=1
 while [ $# -gt 0 ]; do
   case $1 in
-    --domain | --origin | --ip | --port | --http-port | --cacert | --min-days | --stun-host | --stun-port)
+    --domain | --origin | --ip | --port | --http-port | --cacert | --min-days | --stun-host | --stun-port | --only)
       [ $# -ge 2 ] || die "$1 needs a value"
       case $1 in
         --domain) domain=$2 ;;
@@ -46,6 +53,7 @@ while [ $# -gt 0 ]; do
         --min-days) min_days=$2 ;;
         --stun-host) stun_host=$2 ;;
         --stun-port) stun_port=$2 ;;
+        --only) only=$2 ;;
       esac
       shift
       ;;
@@ -53,7 +61,7 @@ while [ $# -gt 0 ]; do
     --no-compose) use_compose=0 ;;
     --quiet-header) header=0 ;;
     -h | --help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}"
+      sed -n '2,26p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -75,6 +83,11 @@ fi
 [ -n "$origin" ] || die "no --origin given and none found in config/relay.toml"
 [[ $port =~ ^[0-9]+$ && $http_port =~ ^[0-9]+$ && $min_days =~ ^[0-9]+$ ]] || die "ports and --min-days must be numbers"
 [[ -z $stun_port || $stun_port =~ ^[0-9]+$ ]] || die "--stun-port must be a number"
+case $only in core | stun | all) ;; *) die "--only must be core, stun or all" ;; esac
+do_core=0
+do_stun=0
+[ "$only" = stun ] || do_core=1
+[ "$only" = core ] || do_stun=1
 need_cmd curl
 need_cmd python3
 
@@ -108,10 +121,20 @@ if [ "$header" -eq 1 ]; then
   info "Verifying $base (origin for CORS tests: $origin)${ip:+, connecting to $ip}"
 fi
 
+# Checks are in two classes (CLASS in lib.sh): core = the relay itself, stun = the STUN service and the list
+# that announces it. The exit code tells them apart (see the heading of this file).
+
 # 1. containers
+compose_ok=0
 if [ "$use_compose" -eq 1 ]; then
   if have_cmd docker && docker compose version >/dev/null 2>&1 && [ -f "$ROOT/.env" ]; then
-    for svc in cometcast-server caddy stun; do
+    compose_ok=1
+    services=()
+    [ "$do_core" -eq 0 ] || services+=(cometcast-server caddy)
+    [ "$do_stun" -eq 0 ] || services+=(stun)
+    for svc in "${services[@]}"; do
+      CLASS=core
+      [ "$svc" != stun ] || CLASS=stun
       state=$(compose ps --format '{{.Health}}' "$svc" 2>/dev/null | head -n 1 || true)
       if [ "$state" = healthy ]; then
         ok "container $svc is healthy"
@@ -119,18 +142,20 @@ if [ "$use_compose" -eq 1 ]; then
         fail "container $svc is not healthy (state: ${state:-not running}); docker compose ps, docker compose logs $svc"
       fi
     done
+    CLASS=core
   else
     warn "docker compose not usable here: container checks skipped"
   fi
 fi
 
-# 2. TLS certificate
-if have_cmd openssl; then
+# 2. TLS certificate (core). -verify_hostname makes openssl check that the certificate is valid for the NAME, also
+# when --ip connects to an address: without it s_client verifies the chain only.
+if [ "$do_core" -eq 1 ] && have_cmd openssl; then
   host_for_tls=${ip:-$domain}
-  ossl=(openssl s_client -connect "$host_for_tls:$port" -servername "$domain" -verify_return_error)
+  ossl=(openssl s_client -connect "$host_for_tls:$port" -servername "$domain" -verify_hostname "$domain" -verify_return_error)
   [ -z "$cacert" ] || ossl+=(-CAfile "$cacert")
   if "${ossl[@]}" </dev/null >"$tmp/tls.out" 2>"$tmp/tls.err"; then
-    ok "TLS: certificate for $domain verifies"
+    ok "TLS: certificate chain verifies and is valid for the name $domain"
     if openssl x509 -noout -checkend $((min_days * 86400)) <"$tmp/tls.out" >/dev/null 2>&1; then
       ok "TLS: certificate valid for at least $min_days more days"
     else
@@ -139,10 +164,11 @@ if have_cmd openssl; then
   else
     fail "TLS: handshake or certificate verification failed ($(grep -m1 -i 'verify error\|error' "$tmp/tls.err" "$tmp/tls.out" 2>/dev/null | head -n 1 | cut -c1-150))"
   fi
-else
+elif [ "$do_core" -eq 1 ]; then
   warn "openssl missing: certificate not checked separately"
 fi
 
+if [ "$do_core" -eq 1 ]; then
 # 3. health endpoint
 req health "$base/healthz"
 if [ "$(code_of health)" = 200 ] && [ "$(tr -d '\r\n' <"$tmp/health.b")" = ok ]; then
@@ -172,6 +198,37 @@ if [ "$(code_of root)" = 404 ]; then
 else
   fail "GET / -> $(code_of root) (expected 404; is the Caddyfile path allowlist in place?)"
 fi
+# 5a. the server itself must not serve web files (core). The Docker image presets COMETCAST_WEB_DIR to the bundled web
+# app; compose.yaml sets it empty, which a server from MIN_SERVER_VERSION on reads as "none". Asked directly on the
+# backend from inside the caddy container (not through Caddy's path allowlist): "/" and other unknown paths must be
+# 404 from the server itself. Skipped without docker compose (--no-compose).
+if [ "$compose_ok" -eq 1 ]; then
+  backend_bad=
+  for path in / /index.html /WS; do
+    bout=$(compose exec -T caddy wget -S -O /dev/null "http://cometcast-server:8443$path" 2>&1 || true)
+    bcode=$(sed -n 's/^[[:space:]]*HTTP\/[0-9.]* \([0-9]*\).*$/\1/p' <<<"$bout" | head -n 1)
+    [ "$bcode" = 404 ] || backend_bad="$backend_bad $path=${bcode:-no-answer}"
+  done
+  if [ -z "$backend_bad" ]; then
+    ok "the server itself answers 404 for /, /index.html and /WS (no web files, case-sensitive routes), asked directly on the backend"
+  else
+    fail "the server answers something else than 404 on the backend:$backend_bad (an image that serves its bundled web app, or a server older than MIN_SERVER_VERSION that does not read COMETCAST_WEB_DIR= as none?)"
+  fi
+fi
+# 5a'. Caddy's path matchers are case-insensitive: /WS and /HEALTHZ pass the allowlist and reach the server, whose
+# routes are case-sensitive. They must end as 404, not as the endpoint and not as a file.
+req upper_ws "$base/WS"
+req upper_hz "$base/HEALTHZ"
+if [ "$(code_of upper_ws)" = 404 ] && [ "$(code_of upper_hz)" = 404 ]; then
+  ok "non-canonical case (/WS, /HEALTHZ) -> 404"
+else
+  fail "non-canonical case: /WS -> $(code_of upper_ws), /HEALTHZ -> $(code_of upper_hz) (expected 404 for both)"
+fi
+
+fi
+
+if [ "$do_stun" -eq 1 ]; then
+CLASS=stun
 # 5b. ICE servers: the public relay lists STUN only (no TURN, no credentials), with CORS for the web app
 req ice -H "Origin: $origin" "$base/ice-servers"
 stun_url=
@@ -250,6 +307,10 @@ else
   fi
 fi
 
+CLASS=core
+fi
+
+if [ "$do_core" -eq 1 ]; then
 # 6. ALTCHA challenge, with CORS
 req altcha -H "Origin: $origin" "$base/altcha/challenge"
 if [ "$(code_of altcha)" = 200 ] && grep -q '"parameters"' "$tmp/altcha.b" && grep -q '"signature"' "$tmp/altcha.b"; then
@@ -302,6 +363,10 @@ else
   fail "WebSocket /ws without Origin (native client): $out"
 fi
 
+fi
+
 info
-info "Summary: $N_OK passed, $N_WARN warnings, $N_FAIL failed."
-[ "$N_FAIL" -eq 0 ]
+info "Summary: $N_OK passed, $N_WARN warnings, $N_FAIL failed ($((N_FAIL - N_FAIL_STUN)) core, $N_FAIL_STUN STUN)."
+if [ $((N_FAIL - N_FAIL_STUN)) -gt 0 ]; then exit 1; fi
+if [ "$N_FAIL_STUN" -gt 0 ]; then exit 2; fi
+exit 0
