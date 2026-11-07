@@ -47,7 +47,7 @@ browser / app  --UDP 3478-->  relay.cometcast.de:3478  --> stun (coturn, STUN on
 | Outbound internet from the VPS | Docker images (Docker Hub for Caddy, ghcr.io for the server), Let's Encrypt. |
 | Inbound TCP 80 and 443 | 80 is needed for certificate requests and the HTTP-to-HTTPS redirect. |
 | Inbound UDP 3478 | The STUN service (section 10.9). Check the provider's firewall as well: many block UDP by default. |
-| An exact release of the server image | It must be a release that **knows the `[stun]` section** (product change "Add STUN support to open mode"); an older server refuses to start (unknown key). **UNCERTAIN: which version number first contains it.** Tags of `ghcr.io/wi-wissen/cometcast-server` (see the product repository's [docs/releasing.md](https://github.com/wi-wissen/CometCast/blob/main/docs/releasing.md)). **UNCERTAIN: no release has been published yet**, so `0.1.0` in `.env.example` is a placeholder. The release workflow pushes only the version tag; `latest` is moved by a separate workflow and is not used here. |
+| An exact release of the server image | It must be a release that **knows the `[stun]` section** (product commit `4853e19` "Add STUN support to open mode", merged as `551e37c`) and reads an empty `COMETCAST_WEB_DIR` as "no web files"; an older server refuses to start (unknown key). The file `MIN_SERVER_VERSION` in this repository records the oldest acceptable version (now `0.1.0`: no release exists yet, so the first release is the first one that can contain these changes; **UNCERTAIN until a release is cut: check that its tag really contains them and bump the file if not**); `up.sh`, `update.sh` and `rollback.sh` refuse anything older (override: the environment variable `MIN_SERVER_VERSION`). Tags of `ghcr.io/wi-wissen/cometcast-server` (see the product repository's [docs/releasing.md](https://github.com/wi-wissen/CometCast/blob/main/docs/releasing.md)). **UNCERTAIN: no release has been published yet**, so `0.1.0` in `.env.example` is a placeholder. The release workflow pushes only the version tag; `latest` is moved by a separate workflow and is not used here. |
 
 Hosting provider, region and registrar are the owner's choice (section 13). For a German project, a provider in the EU
 simplifies the privacy notice; this is a suggestion, not a requirement of the software.
@@ -101,18 +101,26 @@ Log in as root on the new VPS (first time only), then:
    docker compose version         # needs a version that supports `up --wait` (Compose 2.x; 5.6.1 was used)
    ```
    Log in again so the group applies. `compose.yaml` sets log rotation per service.
-4. **Host firewall.** Two ready files, use one of them (read the comments in the file first; keep a second SSH session open):
+4. **Host firewall.** Two ways, use one of them (read the comments in the files first; keep a second SSH session open).
+   Both detect the SSH port(s) (the port of your current session, `sshd -T` as root, the listening sshd sockets, `sshd_config`, else 22)
+   and print what they found: **read that line**, a wrong port locks you out. Override with `SSH_PORT=2222` (ufw.sh) or `--ssh-port 2222` (gen-nftables.sh).
    ```sh
    firewall/ufw.sh              # prints the commands (dry run)
    sudo firewall/ufw.sh --apply
-   # or: sudo nft -c -f firewall/nftables.conf   (check), then sudo nft -f firewall/nftables.conf
+   # or nftables: the files are generated from templates (no hand-edited port):
+   firewall/gen-nftables.sh --check        # as root for --check; writes firewall/generated/{nftables.conf,stun-ratelimit.nft}
+   sudo nft -f firewall/generated/nftables.conf
    ```
+   SSH is **not** throttled by `ufw limit` (it allows 6 new connections per 30 s and address and breaks scripted logins such as ansible); `ufw.sh` uses `ufw allow`
+   (`SSH_LIMIT=1` for `ufw limit`), the nftables file limits per source address to 120 new connections per minute (burst 60). Key-only SSH (step 2) is the protection
+   against guessing. The nftables file also allows DHCP and DHCPv6 (ufw already does).
    **Docker and ufw:** ports that Docker publishes (80, 443, UDP 3478) are forwarded before ufw's rules and are not filtered by them.
    The firewall protects the host's own services (SSH). To block a client address for the relay use Caddy's block list
    (section 10.5), not `ufw deny`. A provider-level firewall (security group) in front of the VPS is a good second layer.
-   **STUN rate limit:** load `firewall/stun-ratelimit.nft` in addition (`sudo nft -c -f firewall/stun-ratelimit.nft`, then
-   `sudo nft -f firewall/stun-ratelimit.nft`; it is its own table and works next to ufw or `nftables.conf`). It is the only
-   firewall piece that sees the published UDP port; see section 10.9 for what it does and does not protect.
+   **STUN rate limit:** load `firewall/generated/stun-ratelimit.nft` in addition (made by `gen-nftables.sh`, with `STUN_PORT` from `.env`;
+   `sudo nft -c -f firewall/generated/stun-ratelimit.nft`, then `sudo nft -f ...`; it is its own table and works next to ufw or the generated
+   `nftables.conf`). It is the only firewall piece that sees the published UDP port; see section 10.9 for what it does, the connection-tracking
+   arithmetic behind its numbers, and what it does not protect.
 5. **Time:** `timedatectl` must show `System clock synchronized: yes` (TLS and ALTCHA expiry depend on it).
 
 ## 4. Get this repository
@@ -164,7 +172,10 @@ sudo scripts/gen-secrets.sh
 ```
 
 Creates `secrets/altcha_secret` (64 hex characters from `openssl rand`), owner `root`, group `65532` (the user of the server
-image), mode `0440`. It never prints the secret, never overwrites an existing one (`--rotate` replaces it: puzzles in
+image), mode `0440`. The directory `secrets/` is `root:root` mode `0711`: **everybody may walk through it** (so that `up.sh`, `bootstrap.sh` and
+`docker compose`, run by the unprivileged `deploy` user, can see that the file exists; with the old `0750` they could not and reported it as missing),
+but only root may list it, and the file stays unreadable for everybody except root and the container's group. `deploy` never reads the secret:
+the Docker daemon (root) does the bind mount. Re-running the script fixes the directory of an older install. It never prints the secret, never overwrites an existing one (`--rotate` replaces it: puzzles in
 flight stop working, nothing else) and the directory is ignored by git. The server needs the secret file so that
 puzzles survive a restart. There is no other secret in this stack: Caddy's certificates are created by Caddy itself on the
 first start and live in a Docker volume.
@@ -175,9 +186,11 @@ first start and live in a Docker volume.
 scripts/up.sh
 ```
 
-`up.sh` checks `.env` and the secret, runs `lint-config.sh` and `docker compose config`, then
-`docker compose up -d --wait` (pulls the images, waits until both containers are healthy) and records the version in
-`.state/version-history` (used by the rollback script). On the first start Caddy requests the certificate; this takes
+`up.sh` checks `.env`, the secret and that the version is not older than `MIN_SERVER_VERSION`, runs `lint-config.sh` and `docker compose config`,
+validates the Caddyfile **and every file in `config/caddy.d/`** with `caddy validate` (a broken block list is found here, before anything is
+started), pulls the server image once and pins its digest (`.state/image-lock`, `COMETCAST_IMAGE_DIGEST` in `.env`: from then on Compose starts
+that digest, not whatever the tag points to), then `docker compose up -d --wait` (waits until all containers are healthy) and records the version in
+`.state/version-history` (used by the rollback script). It runs as `deploy`, not as root. On the first start Caddy requests the certificate; this takes
 seconds when DNS and ports are right.
 
 ```sh
@@ -195,16 +208,22 @@ blocked (provider firewall), or Let's Encrypt rate limits (section 11). Caddy re
 scripts/verify.sh
 ```
 
-Pass/fail output, exit code 0 only if everything passed. It checks, in this order: both containers healthy; the TLS
-certificate verifies and is valid for at least 14 more days; `GET /healthz` is `200 ok`; port 80 redirects to HTTPS;
-`/` is `404`; `GET /ice-servers` is `200` with a STUN-only list (entries have only `urls`, they equal `[stun] urls` in
+Pass/fail output. The checks are in two classes and the **exit code** tells them apart: `0` everything passed, `1` a **core** check failed (the
+relay itself), `2` only **STUN** checks failed (the STUN container, the `/ice-servers` list, the UDP checks). `--only core`, `--only stun` or `--only all`
+(default) select the class; `update.sh` uses them (section 10.3). It checks, in this order: `cometcast-server` and `caddy` healthy (and `stun`, STUN class); the TLS
+certificate chain verifies **and is valid for the host name** (`openssl s_client -verify_hostname`, also when `--ip` connects to an address) and is valid for at least 14 more days; `GET /healthz` is `200 ok`; port 80 redirects to HTTPS;
+`/` is `404` through Caddy; **the server itself serves no web files** (it asks `/`, `/index.html` and `/WS` directly on the backend from inside the caddy container,
+`docker compose exec caddy wget http://cometcast-server:8443/...`, and expects `404` from the server: proves that the empty `COMETCAST_WEB_DIR` took effect and does
+not depend on Caddy's path allowlist); `/WS` and `/HEALTHZ` through Caddy are `404` (Caddy's path matchers are case-insensitive, the server's routes are not);
+`GET /ice-servers` is `200` with a STUN-only list (entries have only `urls`, they equal `[stun] urls` in
 `config/relay.toml`) and the CORS and `no-store` headers; a real STUN Binding request over UDP to the host and port of the
 first URL (`scripts/stun-check.py`) gets a success with your public address and a small answer (at most 3 times the request),
-a TURN Allocate request gets no success, and random bytes get no answer; `GET /altcha/challenge` returns a puzzle with `Cache-Control: no-store` and
+a TURN Allocate request gets **no answer at all** (not a success and not an error such as 401), 17 malformed requests are not amplified, and random bytes get no answer; `GET /altcha/challenge` returns a puzzle with `Cache-Control: no-store` and
 `Access-Control-Allow-Origin: https://cometcast.de`; the CORS preflight from `https://cometcast.de` gives `204` and from a
 foreign origin `403`; a real WebSocket handshake (`scripts/ws-check.py`, standard library only) from the allowed origin
 gives `101`, a `hello` answer, and `altcha_required` for `create_room` without a puzzle solution (proves open mode with
-proof-of-work), from a foreign origin `403`, and without an `Origin` header (native clients) `101`.
+proof-of-work), from a foreign origin `403`, and without an `Origin` header (native clients) `101`. The WebSocket check opens three connections and waits out a
+`429` (up to three times): the server allows 30 new connections per minute and address in open mode, so do not run `verify.sh` in a tight loop from one address.
 
 The same checks by hand, for understanding or from another machine:
 
@@ -221,7 +240,7 @@ python3 -I scripts/ws-check.py --host $R --origin https://evil.example --mode re
 From another machine (no Docker needed; clone this repository there, `curl`, `openssl` and `python3` are enough):
 `scripts/verify.sh --no-compose --origin https://cometcast.de` (add `--no-udp` from a network that blocks UDP). Running
 it from **outside** is the only way to see the real STUN answer: the address in the answer must be the machine's public
-address, not a `172.x` one.
+address, not a `172.x` one (on the host itself the Docker bridge address shows up, which is expected: the request goes through Docker's local proxy).
 Before DNS is switched, `--ip ADDRESS` connects to a given address (the certificate then does not verify unless the name
 points there; use it only after the A record exists).
 
@@ -251,14 +270,19 @@ service was never made.**
 docker compose ps
 docker compose logs --tail 100                    # both services
 docker compose logs -f --since 10m cometcast-server
-docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .level=="warn") | .msg'   # needs jq
+docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .level=="warn") | .msg'   # needs jq (a local test certificate adds one error about the trust store; not on a real host)
 ```
 
 - **Server:** prints a start banner (version, mode, ALTCHA, allowed origins, trusted proxy) and warnings. It has **no log
   levels, no access log, no metrics endpoint** and does not log bans or rate limits. Expected banner lines:
   `mode: open (mediation only); ALTCHA for create_room: required`, `STUN list: on (GET /ice-servers, no credentials)`, `allowed web origins: https://cometcast.de ...`,
   `trusting X-Forwarded-For from 1 proxy network(s)`.
-- **Caddy:** container log with errors and certificate events. The access log is off (it records IP addresses; section 10.5).
+- **Caddy:** the container log (JSON lines) has start-up and certificate events (`certificate obtained successfully`), warnings, and one `admin.api` "received request" line every 30 s
+  from the container's own health check (`127.0.0.1`; filter it out with `jq 'select(.logger != "admin.api")'`). The **access log is off**, so ordinary requests are not logged. But **errors are
+  logged with the visitor's address**: tested with the server stopped, a request got `502` and Caddy logged one `error` line (`logger: http.log.error`) holding `remote_ip`, `client_ip`, the URL,
+  the `User-Agent` and the TLS server name. So with the access log off the container log still contains visitors' IP addresses whenever the proxy fails (server down or restarting, a
+  broken upstream), kept for as long as the log rotation keeps them (10 MB x 5 files). Count that in the privacy notice, and note that a TLS handshake that fails (wrong name, plain HTTP on 443)
+  logged nothing in the same test.
 - **STUN (coturn):** `docker compose logs stun` shows the start-up lines only. At the default verbosity coturn does **not** log STUN Binding requests or client addresses (checked: no line per request). Keep it that way: do not add `verbose` to `config/stun.conf` without deciding about the privacy notice.
 - Logs rotate per service: `json-file`, 10 MB x 5 files each. Look at them with `docker compose logs`, they live under
   `/var/lib/docker/containers/`.
@@ -268,7 +292,8 @@ docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .le
 ```sh
 docker compose restart stun               # config/stun.conf changed (the file is read at start)
 docker compose restart cometcast-server   # config/relay.toml changed; ends all rooms; also clears all bans (see 10.5)
-docker compose restart caddy              # Caddyfile changed (single-file mount: an editor that replaces the file needs this)
+scripts/reload-caddy.sh                   # Caddyfile or block list changed: validates first, then reloads without losing a room; a broken file leaves Caddy untouched
+docker compose restart caddy              # only if the single-file mount went stale (an editor that replaces the file): validate FIRST with scripts/check-caddyfile.sh --validate-only, a restart with a broken file leaves the relay down
 docker compose up -d --force-recreate     # everything
 docker compose down                        # stop (volumes, and so the certificates, stay)
 ```
@@ -281,10 +306,16 @@ Read the release notes of the product repository first. Pull and start an **exac
 scripts/update.sh 0.1.1
 ```
 
-What it does: validates the version (exact `MAJOR.MINOR.PATCH[-pre]`, no `v`, not `latest`), **pulls the image first** (if that
-fails nothing has changed), shows the image digest, writes the version to `.env`, recreates the containers (all rooms end,
-clients reconnect), waits until healthy, runs `verify.sh`, and **rolls back automatically** to the previous version if either
-fails (`--no-rollback` to keep the failed state for inspection; `--no-pull` for an image you loaded yourself).
+What it does: validates the version (exact `MAJOR.MINOR.PATCH[-pre]`, no `v`, not `latest`) and refuses one older than `MIN_SERVER_VERSION` (section 1), **pulls the image first** (if that
+fails nothing has changed), records the image digest in `.state/image-lock` and `COMETCAST_IMAGE_DIGEST` in `.env` (from then on Compose starts that digest, so a tag moved in the registry does not change
+what runs), writes the version to `.env`, recreates the containers (all rooms end, clients reconnect), and then checks in two classes:
+
+- **Core** (decides): `cometcast-server` and `caddy` healthy, then `verify.sh --only core` (TLS, `/healthz`, ALTCHA, CORS, the WebSocket handshake, no web files). A failure **rolls back automatically** to the previous
+  version and `update.sh` exits non-zero (`--no-rollback` keeps the failed state for inspection; `--no-pull` is for an image you loaded yourself).
+- **STUN** (warns): the `stun` service is brought up afterwards and `verify.sh --only stun` checks it (container, `/ice-servers` list, the UDP checks). A failure only **prints a warning and keeps the new version**: the STUN service does
+  not depend on the server version, and a UDP path that is blocked (provider firewall) or a host that cannot reach its own address must not take a working relay back.
+
+The checks connect to `127.0.0.1` (the published ports, certificate verified by name), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
 
 The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
 `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
@@ -302,12 +333,14 @@ scripts/rollback.sh            # to the most recent earlier version in .state/ve
 scripts/rollback.sh 0.1.0      # to a named version (pulled again if it is gone from this host)
 ```
 
-The history file is local to the host and ignored by git. If it is missing, name the version.
+`rollback.sh` refuses a target older than `MIN_SERVER_VERSION` (such a server does not know `[stun]` in `config/relay.toml` and would not start) and, without a name, picks the newest earlier version of the
+history that is not below it. It starts the digest recorded in `.state/image-lock` for that version, and checks the core like `update.sh` (a failing STUN check only warns). To go back further anyway, remove the
+`[stun]` section from `config/relay.toml` **and** set `MIN_SERVER_VERSION=0.0.0` for that command (the browsers then get no STUN list). The history file and the lock file are local to the host and ignored by git. If the history is missing, name the version.
 
 ### 10.5 Abuse handling
 
 What the server does by itself (open-mode defaults, per client address; IPv6 counts per /64, and per /48 with a higher
-threshold): rate limits on connections, `create_room`, `join_room`, `/altcha/challenge`; caps on open connections and rooms per
+threshold): rate limits on connections, `create_room`, `join_room`, `/altcha/challenge` and `/ice-servers` (two separate buckets, `limits.http_per_min` and `limits.ice_per_min`, since the product's `ice_per_min` change); caps on open connections and rooms per
 address and in total; ALTCHA difficulty that rises with load and recent bad events; **temporary bans** after too many failed
 joins (10 within 10 minutes: banned for 1 minute, then 5, then 30; the history is forgotten after an hour). A banned address
 gets `403` with `Retry-After`, a rate-limited one `429` or the error `rate_limited` on the open connection.
@@ -334,9 +367,10 @@ The only visibility is at the edge:
 2. **Block an address or network at the edge.** `cp config/caddy.d/blocklist.caddy.example config/caddy.d/blocklist.caddy`,
    put the addresses in, then
    ```sh
-   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+   scripts/reload-caddy.sh
    ```
-   The connection is closed without an answer, no restart, no rooms lost. Remove the lines the same way. (Tested locally.) The file
+   It validates the Caddyfile and the block list with the pinned Caddy image first and reloads only if that passes; with a syntax error it stops and Caddy keeps the old configuration (`up.sh` validates the same way before it starts anything; a plain
+   `docker compose restart caddy` with a broken block list would leave the relay down). The connection of a blocked address is closed without an answer, no restart, no rooms lost. Remove the lines the same way. (Tested locally, also the broken-file case.) The file
    is ignored by git (IP addresses are personal data). `ufw deny from ...` does **not** work for these ports (section 3.4).
 3. **Unban early or reset the counters:** only by `docker compose restart cometcast-server` (ends all rooms).
 4. **Tighten limits** only with measurements: add `limits.*` keys to `config/relay.toml` (reference table in the product repository's
@@ -358,7 +392,7 @@ The only visibility is at the edge:
 | `secrets/altcha_secret` | host only | Regenerate with `gen-secrets.sh --rotate` if lost (only puzzles in flight fail). |
 | Caddy volume `cometcast-relay_caddy_data` | Docker volume | ACME account and the certificate with its private key. Not fatal to lose (a new certificate is requested), but Let's Encrypt limits duplicate certificates (currently 5 per week for the same names, **UNCERTAIN: check their current limits**), so repeated rebuilds can lock you out for days. |
 | `config/caddy.d/blocklist.caddy` | host only | Your block list. |
-| Version history `.state/` | host only | Convenience for rollback. |
+| Version history and image digests `.state/` | host only | Convenience for rollback (`version-history`, `image-lock`). Losing the lock only means the next update records a new digest. |
 
 Optional backup of the Caddy volume (tested locally, treat the archive as secret because it contains the private key):
 
@@ -422,11 +456,11 @@ How it is locked down (all checked on a local run, section 12):
 
 | Property | Setting |
 | --- | --- |
-| No relaying | `stun-only` (coturn ignores every TURN request) and `no-tcp-relay`. No users, no secret, no realm, no `no-auth`. A TURN Allocate request, also one made with `turnutils_uclient` and made-up credentials, gets **no answer at all** and no allocation. `scripts/stun-check.py` checks this on every `verify.sh` run; it was also run against a normal TURN server and **failed** it there, as it must. |
-| Listeners | UDP 3478 only (`no-tcp`, `no-tls`; DTLS is off by default in 4.18). Published as `3478/udp` only. STUN over TCP/TLS is not offered: browsers use UDP for this and TCP would add nothing but a service to attack. |
-| Small answers | A Binding answer is **32 bytes for a 20-byte request** (factor 1.6): header plus XOR-MAPPED-ADDRESS, no SOFTWARE, no RFC 3489 or RFC 5780 attributes (`no-rfc5780`, `no-software-attribute`; in 4.18 these are defaults, written down so a newer coturn cannot widen the answer silently). `stun-check.py` fails if the answer ever exceeds 3 times the request. |
+| No relaying | `stun-only` (coturn ignores every TURN request) and `no-tcp-relay`. No users, no secret, no realm, no `no-auth`. A TURN Allocate request, also one made with `turnutils_uclient` and made-up credentials, gets **no answer at all** and no allocation: that is what coturn 4.18.0 really does in `stun-only` mode (checked with the real container: Allocate, Refresh, CreatePermission and ChannelData are all dropped silently). `scripts/stun-check.py` therefore requires **silence** on every `verify.sh` run: a success fails it, and so does any error answer, in particular `401 Unauthorized`, `437 Allocation Mismatch` or `441 Wrong Credentials` (what a normal TURN server answers; a service that says so is a TURN server that merely refuses, not a STUN-only one). The check is proven to be able to fail: `scripts/check-stun.sh` starts the same image as a normal TURN server (long-term credentials) as a **positive control**, which answers `401`, and requires `stun-check.py` to reject it with `answered with TURN error 401`. (An earlier version of the check accepted any error answer, so the 401 of a normal TURN server would have passed it.) |
+| Listeners | UDP 3478 only (`no-tcp`, `no-tls`). `no-dtls` does **not exist** in 4.18 (tested: coturn logs `WARNING Bad configuration format: no-dtls` and carries on, so a wrong option does not stop the container; `check-stun.sh` fails on that line); DTLS has no listener without a certificate (the only sockets in the container are UDP 3478). `no-cli` is **deprecated** in 4.18 (`ERROR no-cli option is deprecated`, so it is not set) and the telnet CLI is off by default (no TCP socket at all). Published as `3478/udp` only. STUN over TCP/TLS is not offered: browsers use UDP for this and TCP would add nothing but a service to attack. |
+| Small answers | A Binding answer is **32 bytes for a 20-byte request** (factor 1.6): header plus XOR-MAPPED-ADDRESS, no SOFTWARE, no RFC 3489 or RFC 5780 attributes (`no-rfc5780`, `no-software-attribute`; in 4.18 these are defaults, written down so a newer coturn cannot widen the answer silently). **Malformed requests were measured too** (17 variants: unknown attributes, a length field larger than the packet, no magic cookie, CHANGE-REQUEST, bad FINGERPRINT/MESSAGE-INTEGRITY, other message types, ChannelData, short and empty datagrams): 12 get no answer, 5 are answered (28 to 36 bytes for an unknown required attribute, which is a `420` error answer; 28 to 28 for CHANGE-REQUEST, also `420`; 28 to 32, 32 to 32 and 44 to 32 bytes for optional or ignorable attributes), so the **largest factor over all of them is 1.6 (the plain request); no malformed request gets more than 1.3**, and a padded request gets less than 1 (a 1196-byte request gets 32 bytes). `stun-check.py` fails if any answer ever exceeds 3 times its request. |
 | Garbage | Random bytes get no answer. |
-| Container | not host networking (own Docker network `stun`, so it sees no host service); `read_only`, `tmpfs` for `/tmp`, user `nobody`, `cap_drop: ALL` with only `NET_BIND_SERVICE` added back (needed by the binary's file capability, effective capabilities are empty), `no-new-privileges`, `mem_limit 128m`, `pids_limit 256`, `cpus 0.5` (UNCERTAIN: guesses, never load-tested), image pinned by tag and digest, health check = a real Binding request (`turnutils_stunclient`). |
+| Container | not host networking (own Docker network `stun`, so it sees no host service); `read_only`, `tmpfs` for `/tmp`, user `nobody`, `cap_drop: ALL` with only `NET_BIND_SERVICE` added back (needed by the binary's file capability, effective capabilities are empty), `no-new-privileges`, `mem_limit 128m`, `pids_limit 256`, `cpus 0.5` (UNCERTAIN: guesses, never load-tested), image pinned by tag and digest, health check = a real Binding request (`turnutils_stunclient`; tested with the real container that it exits **1** with `STUN receive timeout` both when nothing listens and when a silent socket drops the packet, and 0 when answered, so an unanswered request does make the container unhealthy). |
 | Logs | No per-request log lines and no client addresses at the default verbosity. |
 | Privacy | The service sees the source address of every request, as any STUN server does, and does not store it. Mention it in the privacy notice (the browser contacts this host on connect). |
 
@@ -434,24 +468,43 @@ How it is locked down (all checked on a local run, section 12):
 can send Binding requests with a victim's address as the source, and the service then sends the victim 32-byte answers. The factor
 is small (1.6) compared with DNS or NTP amplification, but it is not zero, and the relay's bandwidth becomes part of someone else's
 attack. What is done: the smallest possible answer; **per-source and global rate limits at the host firewall**
-(`firewall/stun-ratelimit.nft`: 100 packets/s per IPv4 address or IPv6 /64 with a burst of 200, 5000 packets/s in total; measured
-on a local Docker run: of 1500 packets sent in one burst, 200 were let through and 1300 dropped; it also limits what a forged source
-can make the service send to one victim to about 3 KB/s). What is NOT solved: many spoofed victims at once (each gets its own small
-budget); a forged source can use up a real client's budget for a moment (the browser retries, the request may be lost); a large flood
-of packets still reaches the host's network card before any rule (volume attacks are the provider's job, section 10.5 point 5);
-nothing checks that a source address is real. The limits are guesses (**UNCERTAIN**), and no load test was run. If you see abuse,
-lower the numbers in `firewall/stun-ratelimit.nft` or stop the service (`docker compose stop stun`): the relay keeps working,
+(`firewall/stun-ratelimit.nft.in`, generated to `firewall/generated/stun-ratelimit.nft`: **20 packets/s per IPv4 address or IPv6 /64 with a burst of 40, 200 packets/s in total with a burst of 200**, both
+bounded meters of 65535 addresses; the numbers come from the connection-tracking arithmetic below). Measured locally through Docker's published port from a separate network namespace
+(so with the client's real address): one source sending 3000 requests in a burst got 40 answers (burst 40) and left 40 tracking entries; 60 sources x 30 requests (1800) got about 200 answers (the global
+burst) and 202 entries; a normal request after the burst was answered again. It also limits what a forged source can make the service send to one victim to about 640 bytes/s (20 x 32). What is NOT solved: many spoofed victims at once (each gets its own small
+budget, up to the global ceiling of about 6.4 KB/s in answers); a forged source can use up a real client's budget for a moment (the browser retries, the request may be lost);
+**the global ceiling can be used up by a flood, and STUN then fails for everybody** (HTTPS keeps working: browsers connect without a direct path where NATs allow none); a school or office behind one address shares the per-address budget of 20 packets/s;
+when more than 65535 distinct sources arrive inside 60 s the per-address meter is full and only the global ceiling applies; a large flood of packets still reaches the host's network card before any rule
+(volume attacks are the provider's job, section 10.5 point 5); nothing checks that a source address is real. The numbers follow from arithmetic, not from measuring real users (**UNCERTAIN**). If you see abuse,
+lower them in the template or stop the service (`docker compose stop stun`): the relay keeps working,
 connections then rely on the devices' own STUN fallbacks, if any, or on the same network.
 
-Rate limit with ufw: ufw cannot filter a Docker-published port, so load `firewall/stun-ratelimit.nft` (own nft table, works next
-to ufw). It is lost at reboot unless you make it permanent (**UNCERTAIN**, depends on the distribution; the note in `firewall/nftables.conf`
+**Connection tracking (conntrack) and why the ceiling is that low.** Docker publishes UDP 3478 with DNAT, so every distinct client address and port that gets past the rate limit creates one conntrack
+entry, in the same table that Caddy's TCP connections (and the 5000 WebSockets the server allows) use. When that table is full, the kernel drops new connections of **every** service (`nf_conntrack: table full, dropping packet`).
+How long an entry lives (checked on this kernel with `conntrack -L`): **30 s** after one request and one answer (`nf_conntrack_udp_timeout`), **120 s** (`nf_conntrack_udp_timeout_stream`) once the same address and port send again later than 2 s after the first packet. So with a sustained load of
+`G` packets/s the worst case is `G / 2 x 120 = 60 x G` entries (every flow sends two packets 2.1 s apart; one packet per flow gives only `30 x G`). The kernel's default table size grows with RAM (the kernel documentation gives roughly `RAM / 16384 / 2` entries on a 64-bit machine, capped; **UNCERTAIN: the exact default depends on the kernel version**),
+so about **32768 on a 1 GiB VPS** and 65536 on 2 GiB; the 16 GB test machine here shows 262144. Read yours: `sysctl net.netfilter.nf_conntrack_max`, in use: `conntrack -C`. The old ceiling of 5000 packets/s could therefore have created up to 300000 entries, more than
+the whole table. The new global ceiling of 200 packets/s gives at most `60 x 200 = 12000` entries: 37 % of the smallest usual table, which leaves the rest for HTTPS and Docker. One source can hold at most `60 x 20 = 1200`.
+If you raise `nf_conntrack_max`, you may raise the ceiling in the same proportion: `global packets/s = nf_conntrack_max / 2 / 60`.
+
+*Tuning `nf_conntrack_max`:* `sudo sysctl -w net.netfilter.nf_conntrack_max=131072` (about 300 bytes of non-swappable kernel memory per entry (UNCERTAIN, kernel dependent) plus the hash table: 131072 entries are roughly 40 MiB of the VPS's 1 GiB; raise the hash table too, it
+does not follow by itself: `echo 32768 | sudo tee /sys/module/nf_conntrack/parameters/hashsize`, about `max / 4`), permanent in `/etc/sysctl.d/90-conntrack.conf`. Watch it: `conntrack -C` against `sysctl net.netfilter.nf_conntrack_max`, and `dmesg | grep conntrack` for `table full`.
+(**UNCERTAIN:** the sysctl and hashsize commands were not applied on a real VPS; the formula and the timeouts were read from the kernel here.)
+
+**Why not `notrack`?** Skipping conntrack for UDP 3478 in the raw hook would remove the table pressure entirely, but it **breaks the Docker published-port path**, tested here with the local stack and a client in a separate network namespace:
+with `udp dport 3478 notrack` the packet skips the NAT table, so Docker's DNAT never happens; the packet is then delivered to Docker's userland proxy (`docker-proxy`, which listens on the host port), which forwards it with its own
+source address, and the STUN answer reports **the Docker bridge address (`172.x`) instead of the client's** (observed: `mapped 172.30.9.1` instead of `10.99.0.2`). Browsers would get useless candidates, which is worse than no STUN server.
+`notrack` would only work with `network_mode: host` for the STUN container (no NAT at all); that gives up the container's network isolation (it would see the host's services) and was not built or tested, so it is not used.
+
+Rate limit with ufw: ufw cannot filter a Docker-published port, so load `firewall/generated/stun-ratelimit.nft` (made by `firewall/gen-nftables.sh`; own nft table, works next
+to ufw). It is lost at reboot unless you make it permanent (**UNCERTAIN**, depends on the distribution; the note in `firewall/nftables.conf.in`
 applies). With provider-level firewalls: allow UDP 3478 inbound there too.
 
 Checks by hand:
 
 ```sh
-scripts/check-stun.sh                                            # starts the pinned image with config/stun.conf on loopback and tests it
-python3 -I scripts/stun-check.py --host relay.cometcast.de       # from any machine: binding, allocate refused, garbage ignored
+scripts/check-stun.sh                                            # starts the pinned image with config/stun.conf on loopback, tests it, and runs the positive control (a normal TURN server must fail)
+python3 -I scripts/stun-check.py --host relay.cometcast.de       # from any machine: binding, allocate silent, malformed not amplified, garbage ignored
 docker compose logs stun | grep -E 'ERROR|Bad configuration'     # must print nothing
 ```
 
@@ -479,6 +532,12 @@ client address because the request came from the same machine); IPv6; load; Dock
 | `docker compose` complains about `COMETCAST_VERSION` | `.env` is missing or run from another folder. |
 | Server exits with code 2, message about an unknown key `stun` | The server image is older than the `[stun]` support. Use a newer `COMETCAST_VERSION` (section 1). |
 | `verify.sh`: `GET /ice-servers -> 404` | `[stun]` missing in `config/relay.toml` (or the restart after editing was forgotten), or a Caddyfile without `/ice-servers` in the path list. |
+| `up.sh`: `missing secrets/altcha_secret` although the file exists | `secrets/` is not traversable for your user (an older `gen-secrets.sh` made it `0750`): `sudo scripts/gen-secrets.sh` fixes the directory to `0711` and leaves the secret alone. |
+| `up.sh`, `update.sh` or `rollback.sh`: `older than the minimum server version` | The server release is older than `MIN_SERVER_VERSION` (section 1): it does not know `[stun]` or an empty `COMETCAST_WEB_DIR`. Use a newer one. |
+| `up.sh`: `the Caddyfile or a file in config/caddy.d/ is invalid` | Read the Caddy error above it (a typo in `config/caddy.d/blocklist.caddy` is the usual cause); nothing was started or changed. |
+| `verify.sh` exits `2` | Only STUN checks failed (the relay works): `docker compose logs stun`, `scripts/verify.sh --only stun`. Exit `1` is a core failure. |
+| `verify.sh`: `the server answers something else than 404 on the backend` | The server serves its bundled web app: the server release does not read `COMETCAST_WEB_DIR=` as "none" (older than `MIN_SERVER_VERSION`), or the `environment:` line in `compose.yaml` was removed. |
+| `verify.sh`: STUN `answered with TURN error 401` (or 437, 441) | The `stun` service is a TURN server, not STUN-only: `config/stun.conf` lost `stun-only` or the container runs another config. |
 | `verify.sh`: STUN `no answer ... within 3 s` | UDP 3478 blocked (provider firewall, host firewall, `STUN_PORT` mismatch), the `stun` container is down (`docker compose ps`), or you are on a network that blocks UDP (`--no-udp`). |
 | `verify.sh`: STUN `you are 172.x...` from another machine | Docker replaced the client address (a userland proxy is in the path, for example for IPv6 or a local test). STUN then reports the wrong address: browsers get useless candidates. Publish IPv4 only and check `docker compose ps` for `docker-proxy`. **UNCERTAIN: not seen on a real host.** |
 | `stun` container stops at start | `docker compose logs stun`: a coturn option this version does not know (`ERROR`, `Bad configuration format`), or the config file is unreadable. Run `scripts/check-stun.sh`. |
@@ -505,11 +564,24 @@ STUN service (added later, also local, 2026-11-07, Docker 29.9.2, coturn 4.18.0 
 `scripts/up.sh` (3 long-running containers healthy, the stun container read-only, user `nobody`, effective capabilities none, 128 MiB and 256 pids and 0.5 CPU applied).
 `scripts/verify.sh --ip 127.0.0.1 --cacert ... --min-days 0`: 22 of 22 passed, including `/ice-servers` (STUN only, no credentials, CORS) and the UDP checks
 (Binding success, 32 bytes for 20, Allocate ignored, garbage ignored). `turnutils_uclient` with made-up credentials got **no allocation** from the STUN service, and got a
-relay address from a normal coturn started for comparison (positive control); `stun-check.py` failed that normal server on the Allocate check, as it should. A burst
+relay address from a normal coturn started for comparison (positive control); `stun-check.py` was said to fail that normal server on the Allocate check; in fact the first version accepted any error answer (the 401 of a normal TURN server passed) and was fixed in the review round below. A burst
 of 30 000 Binding requests left the service healthy at about 8 MiB. `firewall/stun-ratelimit.nft` was loaded: of 1500 packets sent in one burst through Docker's
 published port 200 passed and 1300 were dropped (counter), and the same in an isolated network namespace (3000 sent, 3000 received without the rules, 200 with them);
 the table was removed afterwards. **Not run (STUN):** a request from outside (the answer showed the Docker bridge address because the request came from the
 same machine); a real browser connection across two networks; IPv6; real load; `bootstrap.sh`'s new UDP port check (the test container has no `ss`); a permanent nftables setup; `ufw.sh --apply`.
+
+Review fixes (local again, 2026-11-07, Ubuntu 24.04 sandbox, Docker 29.9.2, Compose 5.6.1; server image built from the product worktree with the empty-`web_dir` and `ice_per_min` changes, coturn 4.18.0 and Caddy 2.11.9 by digest;
+the whole flow as an unprivileged user `deploy` in group `docker`, with the repository in `/opt/cometcast-relay` owned by `deploy`): with the old `0750` directory `[ -f secrets/altcha_secret ]` as `deploy` failed (the finding); with
+`root:root 0711` `bootstrap.sh`, `up.sh`, `verify.sh`, `update.sh`, `rollback.sh` and `reload-caddy.sh` all ran as `deploy`, `cat secrets/altcha_secret` and `ls secrets` as `deploy` are denied. `verify.sh`: 25 of 25 (the new checks included: server answers 404 for `/`,
+`/index.html`, `/WS` directly on the backend, `/WS` and `/HEALTHZ` through Caddy, `-verify_hostname`); with `COMETCAST_WEB_DIR` set to the bundled directory the backend check **failed** (`/=200 /index.html=200`) while the old `/` check through Caddy still passed;
+with the `stun` container stopped `verify.sh` exited 2 (`--only core` 0, `--only stun` 2). `update.sh`: a good update; a broken image (exits at start) rolled back automatically to the previous version and its recorded digest and exited non-zero; with the STUN service
+misconfigured (listening on another port) the update to a good version printed the warning and **kept** the new version (exit 0). `MIN_SERVER_VERSION` refusals for `update.sh`, `rollback.sh` (named and automatic, which skipped history entries below the minimum) and `up.sh`.
+The digest is pinned: Compose started `ghcr.io/wi-wissen/cometcast-server:0.1.0@sha256:...` (a local image, whose manifest digest was recorded). `reload-caddy.sh` and `up.sh` with a broken `blocklist.caddy` stopped before touching Caddy (the old one kept serving);
+a valid block list blocked the client's address (connection closed) and unblocked it after removal. Caddy with `timeouts`, `request_body`, and HSTS validated and served; `request_body { max_size 4KB }` did not affect the WebSocket check. STUN from a separate network namespace
+(client address `10.99.0.2`, the real address): the answer reported it. `check-stun.sh` including the positive control (normal coturn answers 401 and fails the check). `firewall/gen-nftables.sh` (defaults, and `--ssh-port 2222,22 --stun-port 3479`) with `nft -c`, and both files loaded inside the test network namespace.
+The rate-limit numbers of section 10.9 were measured through Docker's published port. Also run: `shellcheck`, `scripts/test-lib.sh`, `yamllint` (installed from `requirements-ci.txt` with `--require-hashes`), `actionlint`, `docker compose config` for both profiles, `caddy validate` and `caddy fmt`, `lint-config.sh` (with a multi-line `allowed_origins`, `trusted_proxies` and `urls`, and with Caddy's address inside `ip_range` and with no `ip_range`: both failed as they should).
+`actions/checkout` pin `11d5960a...` is the tag `v4.4.0` (`git ls-remote`), as are the other eight pinned actions of both repositories.
+**Not run (these changes):** a real VPS, a request from the internet (only from a network namespace), the permanent nftables setup and `ufw.sh --apply`, `sysctl nf_conntrack_max` tuning, the SSH rate limit under load, `sshd -T` detection on a real host (the session and file fallbacks ran, `sshd` was absent), a pull of a published image (so the digest came from a local image), `request_body` limits with real browsers.
 
 **Not run (UNCERTAIN):** a real VPS; a real public certificate from Let's Encrypt and its renewal; the real DNS names;
 the real GitHub Pages web app against the relay, from two browsers; IPv6; which client address Caddy sees for remote clients through Docker's
@@ -525,7 +597,7 @@ the GitHub URL; the `internal/` profile on a real network; the CI workflow on Gi
    receiver's own Wi-Fi"): the open-mode server lists a STUN server at `/ice-servers` (`[stun]`, product repository) and this repository runs it (section 10.9, no
    third party). TURN stays internal-only. Still the owner's: whether UDP 3478 on this host and the reflection risk of section 10.9 are acceptable, the privacy
    notice (the browser contacts this host for STUN), and the first server release that contains `[stun]`.
-4. **Access log and privacy notice:** whether Caddy logs client addresses (off by default), for how long, and the matching privacy page on the web site.
+4. **Access log and privacy notice:** whether Caddy logs client addresses (the access log is off by default, but error lines such as a `502` carry the visitor's address, section 10.1), for how long, and the matching privacy page on the web site.
 5. **Who gets notified** by the monitor, and who may log in to the host.
 6. **The first image version** to run (no release exists yet), and whether to also verify digests against release notes.
 7. **Whether more origins** (for example `https://www.cometcast.de` if it is ever served directly) belong in `allowed_origins`.

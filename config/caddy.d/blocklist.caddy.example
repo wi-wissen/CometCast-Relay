@@ -1,5 +1,5 @@
 # Copy to blocklist.caddy (same folder) to block addresses at the edge, then reload:
-#   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+#   scripts/reload-caddy.sh      (validates first; a broken file leaves the running Caddy untouched)
 # blocklist.caddy is ignored by git on purpose (IP addresses are personal data).
 # This file is imported INSIDE the site block, before the handlers; `abort` closes the
 # connection without an answer.

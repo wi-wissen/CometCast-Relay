@@ -49,8 +49,9 @@ The full runbook (DNS, firewall, SSH, Docker, update, rollback, backups, monitor
 | `config/relay.toml` | Server configuration for `relay.cometcast.de` (no secrets), including the `[stun]` list |
 | `config/stun.conf` | coturn configuration of the STUN-only service (no secrets) |
 | `config/caddy.d/` | Operator block list for Caddy (`blocklist.caddy`, not committed) |
-| `scripts/` | `bootstrap.sh`, `gen-secrets.sh`, `up.sh`, `update.sh VERSION`, `rollback.sh`, `verify.sh` (+ `ws-check.py`, `stun-check.py`), `lint-config.sh`, `check-caddyfile.sh`, `check-stun.sh`, `sync-from-product.sh` |
-| `firewall/` | `ufw.sh` and `nftables.conf` for the host, and `stun-ratelimit.nft` (per-source rate limit for the STUN port) |
+| `scripts/` | `bootstrap.sh`, `gen-secrets.sh`, `up.sh`, `update.sh VERSION`, `rollback.sh`, `verify.sh` (+ `ws-check.py`, `stun-check.py`), `reload-caddy.sh`, `lint-config.sh`, `check-caddyfile.sh`, `check-stun.sh`, `test-lib.sh`, `sync-from-product.sh` |
+| `firewall/` | `ufw.sh`, and templates `nftables.conf.in` (host) and `stun-ratelimit.nft.in` (rate limit for the STUN port) with `gen-nftables.sh`, which fills in the SSH and STUN ports of this host |
+| `MIN_SERVER_VERSION`, `requirements-ci.txt` | Oldest server release this configuration works with (checked by `up.sh`, `update.sh`, `rollback.sh`); CI Python tools pinned with hashes |
 | [internal/](internal/README.md) | Optional internal-mode profile with coturn (vendored from the product repository) |
 | `.github/workflows/check.yml` | CI: shellcheck, yamllint, `docker compose config`, Caddyfile validation, config checks |
 

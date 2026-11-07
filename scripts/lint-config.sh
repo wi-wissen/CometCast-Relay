@@ -24,8 +24,13 @@ else
   warn "no Python with tomllib: TOML syntax not checked (the server checks it at start)"
 fi
 
-# Lines without comments, for the greps below.
-active=$(sed -e 's/[[:space:]]*#.*$//' "$toml")
+# Lines without comments, for the greps below. An array that is written over several lines
+# (allowed_origins = [ ... ] with one entry per line) is joined into one line first.
+active=$(sed -e 's/[[:space:]]*#.*$//' "$toml" | awk '
+  joining { buf = buf " " $0; if ($0 ~ /\]/) { print buf; joining = 0; buf = "" } next }
+  /=[[:space:]]*\[/ && !/\]/ { buf = $0; joining = 1; next }
+  { print }
+  END { if (joining) print buf }')
 
 if grep -Eq '^mode[[:space:]]*=[[:space:]]*"open"[[:space:]]*$' <<<"$active"; then
   ok "mode = \"open\""
@@ -86,8 +91,39 @@ elif [ "$(grep -o '"[^"]*"' <<<"$tp" | tr -d '"')" != "$caddy_ip/32" ]; then
 else
   ok "trusted_proxies = $caddy_ip/32 matches Caddy's address in compose.yaml"
 fi
-if [ -n "$subnet" ] && [ -n "$caddy_ip" ] && [ "${caddy_ip%.*}" != "${subnet%.*}" ]; then
-  fail "compose.yaml: caddy address $caddy_ip is not in subnet $subnet"
+# The address pool Docker hands out (ip_range) must NOT contain Caddy's fixed address: that is the real protection
+# against another container on the backend network taking Caddy's address (the server trusts X-Forwarded-For from
+# that address alone). Containers without a fixed address get one from ip_range only.
+ip_range=$(awk '/^[[:space:]]+ip_range:/ { print $2; exit }' "$compose_file")
+if [ -z "$subnet" ] || [ -z "$caddy_ip" ]; then
+  : # reported above
+elif [ -z "$ip_range" ]; then
+  fail "compose.yaml: the backend network has no ip_range: Docker could hand Caddy's address ($caddy_ip) to another container (set ip_range to a part of $subnet that does not contain it)"
+elif have_cmd python3; then
+  if range_msg=$(python3 -I - "$caddy_ip" "$subnet" "$ip_range" <<'PY' 2>&1
+import ipaddress, sys
+caddy, subnet, pool = sys.argv[1:4]
+try:
+    c = ipaddress.ip_address(caddy)
+    s = ipaddress.ip_network(subnet, strict=True)
+    p = ipaddress.ip_network(pool, strict=True)
+except ValueError as e:
+    sys.exit("cannot parse the addresses: %s" % e)
+if c not in s:
+    sys.exit("caddy address %s is not in subnet %s" % (c, s))
+if not p.subnet_of(s):
+    sys.exit("ip_range %s is not inside subnet %s" % (p, s))
+if c in p:
+    sys.exit("caddy address %s lies INSIDE ip_range %s: another container could be given it" % (c, p))
+print("caddy address %s is in subnet %s and outside ip_range %s" % (c, s, p))
+PY
+  ); then
+    ok "$range_msg"
+  else
+    fail "compose.yaml: $range_msg"
+  fi
+else
+  warn "no python3: Caddy's address was not checked against ip_range"
 fi
 
 # --- STUN list ([stun] urls) and the STUN service (compose.yaml service "stun", config/stun.conf) ---

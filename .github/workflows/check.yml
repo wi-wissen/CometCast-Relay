@@ -24,11 +24,14 @@ jobs:
           persist-credentials: false
 
       - name: shellcheck (our scripts)
-        run: shellcheck -x -P SCRIPTDIR scripts/*.sh firewall/ufw.sh
+        run: shellcheck -x -P SCRIPTDIR scripts/*.sh firewall/*.sh
 
       - name: bash syntax
         run: |
-          for f in scripts/*.sh firewall/ufw.sh; do bash -n "$f"; done
+          for f in scripts/*.sh firewall/*.sh; do bash -n "$f"; done
+
+      - name: helpers (version comparison, minimum server version, image lock, ssh ports)
+        run: scripts/test-lib.sh
 
       - name: python syntax
         run: python3 -I -m py_compile scripts/ws-check.py scripts/stun-check.py
@@ -36,7 +39,7 @@ jobs:
       - name: yamllint
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet yamllint==1.35.1
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-ci.txt
           "$RUNNER_TEMP/venv/bin/yamllint" -c .yamllint.yaml compose.yaml internal/compose.yaml .github/workflows .yamllint.yaml
 
       - name: config consistency (mode, origins, trusted proxy, no TURN, STUN list and STUN-only service)
@@ -58,13 +61,17 @@ jobs:
           echo 0123456789abcdef0123456789abcdef > secrets/altcha_secret
           docker compose config --quiet
 
-      - name: STUN service (coturn accepts config/stun.conf, answers Binding, ignores Allocate)
+      - name: STUN service (coturn accepts config/stun.conf, answers Binding, stays silent for Allocate, normal TURN server fails the control)
         run: scripts/check-stun.sh
 
-      - name: nftables files (syntax)
+      - name: nftables files (generate from the templates, then check the syntax)
         run: |
-          sudo nft -c -f firewall/nftables.conf
-          sudo nft -c -f firewall/stun-ratelimit.nft
+          firewall/gen-nftables.sh --ssh-port 22 --out-dir "$RUNNER_TEMP/nft"
+          firewall/gen-nftables.sh --ssh-port 2222,22 --stun-port 3479 --out-dir "$RUNNER_TEMP/nft2"
+          for d in nft nft2; do
+            sudo nft -c -f "$RUNNER_TEMP/$d/nftables.conf"
+            sudo nft -c -f "$RUNNER_TEMP/$d/stun-ratelimit.nft"
+          done
 
       - name: Caddyfile (validate and format, with the image from compose.yaml)
         run: scripts/check-caddyfile.sh
