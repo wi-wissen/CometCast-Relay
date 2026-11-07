@@ -5,3 +5,12 @@ certs/
 *.pem
 *.key
 turnserver.conf
+internal/.env
+internal/secrets/
+internal/certs/
+internal/coturn/turnserver.conf
+internal/config/server.toml
+# Local state of the scripts (version history) and operator block list (IP addresses)
+.state/
+config/caddy.d/*.caddy
+__pycache__/

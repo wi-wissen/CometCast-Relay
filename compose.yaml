@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Public Comet Cast relay: cometcast-server (open mode) behind Caddy (automatic TLS).
+# Start with scripts/up.sh (it checks the prerequisites first), see docs/SETUP.md.
+#
+# Layout:
+#   internet --443/80--> caddy --(network "backend", plain HTTP)--> cometcast-server:8443
+# - Only Caddy publishes ports. The server publishes nothing and sits on an internal network
+#   without a route to the internet (it needs none).
+# - Caddy has a fixed address on "backend". It MUST equal network.trusted_proxies in
+#   config/relay.toml; scripts/lint-config.sh checks that.
+# - No TURN service: the server refuses a [turn] section in open mode (internal/ has an
+#   optional internal-mode profile with coturn).
+# - Status of this file: `docker compose config` is checked in CI. The full stack was run once on a
+#   local machine with a local certificate (see docs/SETUP.md "What was tested").
+#   UNCERTAIN: a run on a real VPS with a public certificate has not happened yet.
+
+name: cometcast-relay
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  cometcast-server:
+    # Exact release tag from .env (COMETCAST_VERSION). "latest" is deliberately not used.
+    image: ghcr.io/wi-wissen/cometcast-server:${COMETCAST_VERSION:?set COMETCAST_VERSION in .env (see .env.example)}
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - ./config/relay.toml:/etc/cometcast/server.toml:ro
+    secrets:
+      - altcha_secret
+    environment:
+      # The image presets COMETCAST_WEB_DIR to the bundled web app. The public relay does not
+      # serve it (the web app lives on GitHub Pages), so unset it.
+      COMETCAST_WEB_DIR: ""
+    # Image runs as UID 65532 already. Nothing to write, no rights needed.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # UNCERTAIN: unmeasured placeholders taken from the product repo's compose file.
+    mem_limit: 512m
+    pids_limit: 512
+    stop_grace_period: 10s
+    logging: *logging
+    # The health check comes from the image (`cometcast-server --healthcheck`, reads
+    # /etc/cometcast/server.toml and COMETCAST_* variables).
+
+  # One-shot: the named volumes are created root-owned, Caddy runs as 65532. Same image as Caddy. Not
+  # recursive on purpose: what Caddy creates below is already its own (and 0700, which root without
+  # CAP_DAC_OVERRIDE cannot enter: a recursive chown failed on the second start in the local run).
+  caddy-init:
+    image: &caddy_image caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0
+    user: "0:0"
+    entrypoint: ["chown", "65532:65532", "/data", "/config"]
+    command: []
+    restart: "no"
+    networks: [edge]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    pids_limit: 32
+    logging: *logging
+
+  caddy:
+    image: *caddy_image
+    restart: unless-stopped
+    user: "65532:65532"
+    depends_on:
+      caddy-init:
+        condition: service_completed_successfully
+      cometcast-server:
+        condition: service_healthy
+    networks:
+      edge: {}
+      backend:
+        # Must equal network.trusted_proxies in config/relay.toml.
+        ipv4_address: 172.29.53.2
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${BIND_ADDR:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:-relay.cometcast.de}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/caddy.d:/etc/caddy/conf.d:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Binding 80/443 as a non-root user without file capabilities (they do not combine with
+    # no-new-privileges): lower the unprivileged port start inside this container's network namespace.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 256
+    stop_grace_period: 10s
+    logging: *logging
+    healthcheck:
+      # Caddy's admin API is only reachable inside the container (127.0.0.1:2019, not published).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # Reachable from the internet side; ACME and published ports use it.
+  edge: {}
+  # Server <-> Caddy only. internal: true means no route to the outside.
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.53.0/24
+          # Docker hands out addresses from this upper half; Caddy's fixed address (.2) is in the
+          # lower half, so no other container can take it first (found in the first local run).
+          ip_range: 172.29.53.128/25
+
+volumes:
+  # Caddy's ACME account and certificates (private keys). Losing them is not fatal (Caddy
+  # requests new ones) but see docs/SETUP.md "Backups" for Let's Encrypt rate limits.
+  caddy_data: {}
+  caddy_config: {}
+
+secrets:
+  altcha_secret:
+    file: ./secrets/altcha_secret

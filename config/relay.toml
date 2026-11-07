@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# cometcast-server configuration of the public relay relay.cometcast.de.
+# Derived from deploy/config/cometcast-server.example.toml of the product repository
+# (wi-wissen/CometCast). Mounted read-only at /etc/cometcast/server.toml.
+# No secrets in this file: the ALTCHA secret comes from a file (secrets/altcha_secret).
+#
+# Not set here on purpose: `listen` (the image listens on 0.0.0.0:8443 inside its container,
+# the port is never published), `[tls]` (Caddy does TLS), `[turn]` (refused in open mode),
+# all `limits.*` (the strict open-mode defaults apply; do not lower them without measuring).
+#
+# For your own relay: change allowed_origins to the origin(s) of your web app. A web app on
+# GitHub Pages under https://example.org/app/ has the origin https://example.org .
+
+mode = "open"
+
+# Web origins that may use this relay from a browser: CORS on /altcha/challenge and /healthz plus
+# an Origin check on /ws. Exact match: scheme and host (and port), no path, no trailing slash, no
+# wildcard, and "*" is refused in open mode. The web app is served at https://cometcast.de/app/ , its
+# origin is https://cometcast.de . Add more origins here only for web apps you really host.
+# Native clients and curl send no Origin header and are always accepted.
+allowed_origins = ["https://cometcast.de"]
+
+[network]
+# Caddy's fixed address on the compose network "backend" (compose.yaml, service caddy).
+# X-Forwarded-For is believed from this address and from nobody else. Without it every client would
+# share one address (one set of limits and bans). Must match compose.yaml; scripts/lint-config.sh checks it.
+trusted_proxies = ["172.29.53.2/32"]
+
+[altcha]
+# Open mode forces "always"; written out so the file says what happens.
+mode = "always"
+# Fixed secret so puzzles survive a restart. Made by scripts/gen-secrets.sh, at least 16 characters.
+secret_file = "/run/secrets/altcha_secret"

@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Caddy in front of cometcast-server. Caddy gets and renews the TLS certificate by itself
+# (Let's Encrypt; needs ports 80 and 443 reachable and DNS pointing here).
+#
+# Edit RELAY_DOMAIN in .env (default below), not this file, for your own relay.
+{
+	# WebSocket upgrades are HTTP/1.1; HTTP/3 (UDP) is not used: HTTP/1.1 and HTTP/2 only.
+	servers {
+		protocols h1 h2
+	}
+	# Access log: OFF by default (it would record visitors' IP addresses; decide first, see
+	# docs/SETUP.md "Abuse handling"). Errors go to the container log.
+}
+
+{$RELAY_DOMAIN:relay.cometcast.de} {
+	header -Server
+
+	route {
+		# Operator-maintained block list (empty by default). See config/caddy.d/blocklist.caddy.example.
+		import /etc/caddy/conf.d/*.caddy
+
+		# Only what the relay needs is passed on. The Docker image also contains a copy of the web app and
+		# answers every other path with it; the public relay does not offer that.
+		@relay path /ws /healthz /altcha/challenge
+		handle @relay {
+			# Caddy replaces any X-Forwarded-For sent by the client with the address it saw (its default for
+			# clients it does not trust; checked locally with a forged header, docs/SETUP.md). The server
+			# believes the header only from Caddy's address (network.trusted_proxies). Never add
+			# "trusted_proxies" to Caddy's global options unless a CDN really sits in front.
+			reverse_proxy cometcast-server:8443
+		}
+
+		handle {
+			respond "not found" 404
+		}
+	}
+}
