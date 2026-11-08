@@ -104,9 +104,11 @@ Log in as root on the new VPS (first time only), then:
 4. **Host firewall.** Two ways, use one of them (read the comments in the files first; keep a second SSH session open).
    Both detect the SSH port(s) (the port of your current session, `sshd -T` as root, the listening sshd sockets, `sshd_config`, else 22)
    and print what they found: **read that line**, a wrong port locks you out. Override with `SSH_PORT=2222` (ufw.sh) or `--ssh-port 2222` (gen-nftables.sh).
+   `sudo` removes `SSH_CONNECTION`, so as root the port of your session is not seen and the result can differ from the dry run: `ufw.sh --apply` under `sudo`
+   therefore refuses to run without `SSH_PORT`; pass the port(s) the dry run printed.
    ```sh
-   firewall/ufw.sh              # prints the commands (dry run)
-   sudo firewall/ufw.sh --apply
+   firewall/ufw.sh              # prints the commands (dry run) and the SSH port(s) it found
+   sudo SSH_PORT=22 firewall/ufw.sh --apply   # the port(s) from the dry run
    # or nftables: the files are generated from templates (no hand-edited port):
    firewall/gen-nftables.sh --check        # as root for --check; writes firewall/generated/{nftables.conf,stun-ratelimit.nft}
    sudo nft -f firewall/generated/nftables.conf

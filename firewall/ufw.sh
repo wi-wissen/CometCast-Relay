@@ -5,7 +5,8 @@
 # Default: only PRINTS the commands. Run with --apply (as root) to execute them.
 # The SSH port(s) are detected (the port of your current SSH session, `sshd -T` as root, the listening sshd
 # sockets, sshd_config, else 22) and printed; set SSH_PORT (one port or a comma separated list) to override. A wrong
-# port locks you out: read the printed commands, and keep a second session open.
+# port locks you out: read the printed commands, and keep a second session open. sudo removes SSH_CONNECTION, so
+# `sudo firewall/ufw.sh --apply` refuses to guess: give the port(s) of the dry run, sudo SSH_PORT=22 firewall/ufw.sh --apply.
 # SSH is allowed without ufw's `limit` rule (6 new connections per 30 s and address), which throttles scripted logins
 # (ansible, one session per command). Key-only SSH is the protection against guessing (docs/SETUP.md section 3, step 2); set
 # SSH_LIMIT=1 to use `ufw limit` anyway. ufw's own rules already allow DHCP/DHCPv6 and ICMP.
@@ -24,27 +25,34 @@ set -euo pipefail
 # shellcheck source=../scripts/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib.sh"
 
-ssh_source=given
-if [ -z "${SSH_PORT:-}" ]; then
-  SSH_PORT=$(detect_ssh_ports)
-  ssh_source=detected
-fi
-IFS=, read -r -a ssh_ports <<<"$SSH_PORT"
-for p in "${ssh_ports[@]}"; do
-  [[ $p =~ ^[0-9]+$ ]] || { echo "error: SSH_PORT must be a number or a comma separated list of numbers" >&2; exit 1; }
-done
-echo "# SSH ports: $SSH_PORT ($ssh_source)" >&2
-SSH_LIMIT=${SSH_LIMIT:-0}
-STUN_PORT=${STUN_PORT:-$(env_get STUN_PORT)}
-STUN_PORT=${STUN_PORT:-3478}
-[[ $STUN_PORT =~ ^[0-9]+$ ]] || { echo "error: STUN_PORT must be a number" >&2; exit 1; }
-
 apply=0
 case "${1:-}" in
   '') ;;
   --apply) apply=1 ;;
   *) echo "usage: $0 [--apply]" >&2; exit 1 ;;
 esac
+
+ssh_source=given
+if [ -z "${SSH_PORT:-}" ]; then
+  # sudo removes SSH_CONNECTION from the environment, so under sudo the port of your session is not seen and the
+  # detection can find other ports than the dry run did (lockout). Make the operator name them.
+  if [ "$apply" -eq 1 ] && [ -n "${SUDO_USER:-}" ] && [ -z "${SSH_CONNECTION:-}" ]; then
+    echo "error: under sudo the port of your SSH session cannot be detected (sudo removes SSH_CONNECTION). Name the port(s) shown by the dry run: sudo SSH_PORT=<port> firewall/ufw.sh --apply" >&2
+    exit 1
+  fi
+  SSH_PORT=$(detect_ssh_ports)
+  ssh_source=detected
+fi
+IFS=, read -r -a ssh_ports <<<"$SSH_PORT"
+[ "${#ssh_ports[@]}" -gt 0 ] || { echo "error: no SSH port" >&2; exit 1; }
+for p in "${ssh_ports[@]}"; do
+  valid_port "$p" || { echo "error: SSH_PORT must be a port (1-65535) or a comma separated list of ports, got '$p'" >&2; exit 1; }
+done
+echo "# SSH ports: $SSH_PORT ($ssh_source)" >&2
+SSH_LIMIT=${SSH_LIMIT:-0}
+STUN_PORT=${STUN_PORT:-$(env_get STUN_PORT)}
+STUN_PORT=${STUN_PORT:-3478}
+valid_port "$STUN_PORT" || { echo "error: STUN_PORT must be a port (1-65535), got '$STUN_PORT'" >&2; exit 1; }
 
 ssh_verb=allow
 [ "$SSH_LIMIT" != 1 ] || ssh_verb=limit
