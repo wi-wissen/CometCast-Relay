@@ -177,8 +177,8 @@ Creates `secrets/altcha_secret` (64 hex characters from `openssl rand`), owner `
 image), mode `0440`. The directory `secrets/` is `root:root` mode `0711`: **everybody may walk through it** (so that `up.sh`, `bootstrap.sh` and
 `docker compose`, run by the unprivileged `deploy` user, can see that the file exists; with the old `0750` they could not and reported it as missing),
 but only root may list it, and the file stays unreadable for everybody except root and the container's group. `deploy` never reads the secret:
-the Docker daemon (root) does the bind mount. Re-running the script fixes the directory of an older install. It never prints the secret, never overwrites an existing one (`--rotate` replaces it: puzzles in
-flight stop working, nothing else) and the directory is ignored by git. The server needs the secret file so that
+the Docker daemon (root) does the bind mount. Re-running the script fixes the directory of an older install. It never prints the secret, never overwrites an existing one (`--rotate` replaces it; the server
+reads the secret only at start, so the new one takes effect after `docker compose up -d --force-recreate cometcast-server`, which ends all rooms and makes puzzles in flight fail once) and the directory is ignored by git. The server needs the secret file so that
 puzzles survive a restart. There is no other secret in this stack: Caddy's certificates are created by Caddy itself on the
 first start and live in a Docker volume.
 
@@ -394,7 +394,7 @@ The only visibility is at the edge:
 | Rooms, bans, counters | server memory | **No state on disk** (confirmed by the server documentation). Nothing to back up; a restart ends all rooms and clears bans. |
 | Configuration | this repository (`config/`, `Caddyfile`, `compose.yaml`) | In git. |
 | `.env` | host only, no secrets inside | Keep a copy of the two values (version, domain). |
-| `secrets/altcha_secret` | host only | Regenerate with `gen-secrets.sh --rotate` if lost (only puzzles in flight fail). |
+| `secrets/altcha_secret` | host only | Regenerate with `gen-secrets.sh --rotate` if lost, then `docker compose up -d --force-recreate cometcast-server` (the server reads it only at start; ends all rooms, puzzles in flight fail once). |
 | Caddy volume `cometcast-relay_caddy_data` | Docker volume | ACME account and the certificate with its private key. Not fatal to lose (a new certificate is requested), but Let's Encrypt limits duplicate certificates (currently 5 per week for the same names, **UNCERTAIN: check their current limits**), so repeated rebuilds can lock you out for days. |
 | `config/caddy.d/blocklist.caddy` | host only | Your block list. |
 | Version history and image digests `.state/` | host only | Convenience for rollback (`version-history`, `image-lock`). Losing the lock only means the next update records a new digest. |
