@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Unit tests of the helpers in lib.sh that decide things: version comparison (the minimum server version check of
-# update.sh/rollback.sh/up.sh), the image digest lock file, port numbers, the check address and the SSH port list.
+# update.sh/rollback.sh/up.sh), the image digest lock file, the optional attestation check, port numbers, the check address
+# and the SSH port list.
 # No Docker, no network. Used by CI.
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -90,6 +91,33 @@ test_check_ip() (
   [ "$(check_ip)" = 203.0.113.9 ] || exit 1
 )
 t "check_ip: 127.0.0.1 unless BIND_ADDR names one address" test_check_ip
+
+# verify_attestation: off by default; when on, it refuses (dies) without a digest or without gh, and passes the
+# reference and repository to gh. A fake gh on PATH stands in for the GitHub CLI (no network).
+test_attest() (
+  ROOT=$tmp
+  d=sha256:$(printf 'c%.0s' $(seq 64))
+  printf 'RELAY_DOMAIN=x\n' >"$tmp/.env"
+  (VERIFY_ATTESTATION='' verify_attestation img "$d") || exit 1
+  (VERIFY_ATTESTATION=0 verify_attestation img "") || exit 1
+  if (VERIFY_ATTESTATION=1 verify_attestation img "") 2>/dev/null; then exit 1; fi
+  if (PATH=/nonexistent VERIFY_ATTESTATION=1 verify_attestation img "$d") 2>/dev/null; then exit 1; fi
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/gh" <<'GH'
+#!/bin/sh
+printf '%s\n' "$*" >"$FAKE_GH_OUT"
+exit "${FAKE_GH_RC:-0}"
+GH
+  chmod +x "$tmp/bin/gh"
+  export FAKE_GH_OUT=$tmp/gh-args
+  (PATH=$tmp/bin:$PATH FAKE_GH_RC=0 VERIFY_ATTESTATION=1 verify_attestation img "$d") || exit 1
+  [ "$(cat "$tmp/gh-args")" = "attestation verify oci://$IMAGE_REPO@$d --repo $ATTEST_REPO" ] || exit 1
+  if (PATH=$tmp/bin:$PATH FAKE_GH_RC=1 VERIFY_ATTESTATION=1 verify_attestation img "$d") 2>/dev/null; then exit 1; fi
+  # The flag from .env counts when the environment does not set it.
+  printf 'VERIFY_ATTESTATION=1\n' >"$tmp/.env"
+  if (unset VERIFY_ATTESTATION; verify_attestation img "") 2>/dev/null; then exit 1; fi
+)
+t "verify_attestation: off by default, refuses without digest or gh, calls gh attestation verify" test_attest
 
 # SSH port detection: the session's own port is always included (a wrong list locks you out).
 got=$(SSH_CONNECTION='198.51.100.7 51234 203.0.113.9 2222' detect_ssh_ports)

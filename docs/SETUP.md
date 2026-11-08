@@ -323,8 +323,23 @@ The checks connect to `127.0.0.1` (the published ports, certificate verified by 
 `up.sh`, `update.sh` and `rollback.sh` hold a lock (`.state/lock`): one of them started while another runs stops at once. If `update.sh` is interrupted
 (Ctrl-C, `TERM`, a closed SSH session) before the core check has passed, it sets `.env` back to the previous version and stops; then run `scripts/up.sh`.
 
-The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
-`docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
+**Build provenance (optional, off by default).** The product's release workflow is set up to publish a signed build provenance
+attestation (GitHub artifact attestation, Sigstore) for each released image (product repository, `docs/releasing.md`). With the
+GitHub CLI installed and logged in (`gh auth login`, or `GH_TOKEN`), set `VERIFY_ATTESTATION=1` in `.env` (or in the environment of
+the command). Then `update.sh` (after the pull) and `up.sh` (when it records a digest for a version for the first time) run
+
+```sh
+gh attestation verify oci://ghcr.io/wi-wissen/cometcast-server@sha256:<digest> --repo wi-wissen/CometCast
+```
+
+and stop **before** the digest is recorded or anything is restarted when the check fails, when `gh` is missing, or when the image
+has no registry digest (a local image). Without the flag nothing is checked. The same check by hand, for any tag:
+`gh attestation verify oci://ghcr.io/wi-wissen/cometcast-server:0.1.1 --owner wi-wissen` (`--repo wi-wissen/CometCast` is stricter: only
+that repository's workflows count). `rollback.sh` does not check: it goes back to a digest that was recorded (and, with the flag, checked) earlier.
+**UNCERTAIN:** not run yet. No release with an attestation exists; the workflow change was only checked statically, and whether
+`gh attestation verify` finds the attestation of an `oci://...@sha256:` reference to ghcr.io the way it is pushed was not tested.
+Images released before that change have no attestation, so the check fails for them: leave the flag off for those.
+Without the flag, compare the printed digest with the one you trust: `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
 
 Update the STUN service the same way: edit the pinned `coturn/coturn:<tag>@sha256:...` line in `compose.yaml`, run `scripts/check-stun.sh` (starts that image with `config/stun.conf` and checks it) and `scripts/up.sh`. Another coturn version can know other options: a wrong option is a start error or a `Bad configuration format` warning, which `check-stun.sh` turns into a failure.
 
@@ -447,7 +462,8 @@ manipulated signalling channel (for example by checking DTLS fingerprints out of
    compromised user in the `docker` group, an outdated host.
 6. **Tell people:** publish a short notice, and check your legal duties (the relay may have handled IP addresses; a possible duty to
    notify under the GDPR within 72 hours is a question for the responsible person, this runbook gives no legal advice).
-7. If the **image** is suspected: images are unsigned; compare digests with the release notes of the product repository, and rebuild
+7. If the **image** is suspected: check its build provenance (`gh attestation verify`, section 10.3; only releases made after attestations
+   were added have one), compare digests with the release notes of the product repository, and rebuild
    from source (`deploy/Dockerfile` in the product repository) if in doubt.
 
 ### 10.9 STUN service
@@ -605,5 +621,6 @@ the GitHub URL; the `internal/` profile on a real network; the CI workflow on Gi
    notice (the browser contacts this host for STUN), and the first server release that contains `[stun]`.
 4. **Access log and privacy notice:** whether Caddy logs client addresses (the access log is off by default, but error lines such as a `502` carry the visitor's address, section 10.1), for how long, and the matching privacy page on the web site.
 5. **Who gets notified** by the monitor, and who may log in to the host.
-6. **The first image version** to run (no release exists yet), and whether to also verify digests against release notes.
+6. **The first image version** to run (no release exists yet), and whether to also verify digests against release notes and turn on
+   `VERIFY_ATTESTATION=1` (section 10.3) once a release with an attestation exists.
 7. **Whether more origins** (for example `https://www.cometcast.de` if it is ever served directly) belong in `allowed_origins`.

@@ -34,6 +34,8 @@ if [ -z "$(lock_digest "$version")" ]; then
     compose pull cometcast-server || die "could not pull $image"
   fi
   digest=$(image_digest "$image") || die "$image is not on this host after the pull; cannot record its digest"
+  # Optional (VERIFY_ATTESTATION=1, docs/SETUP.md 10.3): check the build provenance before the digest is recorded.
+  verify_attestation "$image" "$digest"
   if [ -n "$digest" ]; then
     lock_record "$version" "$digest"
     info "recorded $version = $digest in .state/image-lock"

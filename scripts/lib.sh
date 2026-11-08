@@ -204,6 +204,23 @@ image_digest() {
   docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$1" 2>/dev/null | sed -n 's/^.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p'
 }
 
+# verify_attestation IMAGE_REF DIGEST: with VERIFY_ATTESTATION=1 (environment, else .env), check the build provenance
+# attestation of DIGEST with the GitHub CLI (`gh attestation verify`, needs `gh auth login` or GH_TOKEN): the image must
+# have been built by a workflow of the product repository (ATTEST_REPO). Stops the calling script when the check
+# fails, when gh is missing or when there is no digest (a local image cannot be checked). Off by default.
+# UNCERTAIN: never run against a real release (no release with an attestation exists yet), see docs/SETUP.md 10.3.
+ATTEST_REPO=wi-wissen/CometCast
+verify_attestation() {
+  local flag=${VERIFY_ATTESTATION:-$(env_get VERIFY_ATTESTATION)}
+  [ "$flag" = 1 ] || return 0
+  [ -n "${2:-}" ] || die "VERIFY_ATTESTATION=1, but $1 has no registry digest (a local image) and cannot be checked"
+  have_cmd gh || die "VERIFY_ATTESTATION=1 needs the GitHub CLI 'gh' (and gh auth login); install it or set VERIFY_ATTESTATION=0"
+  info "checking the build provenance attestation of ${IMAGE_REPO}@$2 (gh attestation verify --repo $ATTEST_REPO) ..."
+  gh attestation verify "oci://${IMAGE_REPO}@$2" --repo "$ATTEST_REPO" >/dev/null ||
+    die "the attestation of $1 ($2) could not be verified; not using this image"
+  info "attestation verified: $1 ($2) was built by $ATTEST_REPO"
+}
+
 # pin_version VERSION: write COMETCAST_VERSION and the matching COMETCAST_IMAGE_DIGEST (empty when none
 # is known) to .env.
 pin_version() {
