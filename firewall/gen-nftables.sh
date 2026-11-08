@@ -50,7 +50,6 @@ fi
 [ -n "$stun_port" ] || stun_port=$(env_get STUN_PORT)
 [ -n "$stun_port" ] || stun_port=3478
 
-valid_port() { [[ $1 =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 IFS=, read -r -a plist <<<"$ssh_ports"
 [ "${#plist[@]}" -gt 0 ] || die "no SSH port"
 for p in "${plist[@]}"; do valid_port "$p" || die "'$p' is not a TCP port (--ssh-port N[,N...])"; done

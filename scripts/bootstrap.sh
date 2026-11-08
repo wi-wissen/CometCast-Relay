@@ -132,8 +132,11 @@ fi
 if have_cmd getent; then
   resolved=$(getent ahosts "$domain" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ' || true)
   if [ -z "${resolved// /}" ]; then
-    fail "DNS: $domain does not resolve yet (create the A/AAAA records, docs/SETUP.md)"
+    fail "DNS: $domain does not resolve yet (create the A record, no AAAA record yet: docs/SETUP.md section 2)"
   else
+    case $resolved in
+      *:*) warn "DNS: $domain has an AAAA record; the ports are published on IPv4 only, so connections over IPv6 fail (docs/SETUP.md section 2: no AAAA record yet)" ;;
+    esac
     local_addrs=$(ip -o addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }' | sort -u | tr '\n' ' ' || true)
     match=0
     for a in $resolved; do

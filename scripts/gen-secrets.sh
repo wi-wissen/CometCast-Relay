@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Creates secrets/altcha_secret (the key that signs ALTCHA puzzles). Never prints the secret and
-# never overwrites an existing one (use --rotate to replace it on purpose: puzzles in flight stop
-# working, nothing else happens). The files are not committed (.gitignore).
+# never overwrites an existing one (use --rotate to replace it on purpose). The server reads the secret only
+# at start: a rotation takes effect after `docker compose up -d --force-recreate cometcast-server`, which ends
+# all rooms (clients reconnect) and makes puzzles in flight fail once. The files are not committed (.gitignore).
 #
 # The server container runs as UID 65532 and reads the file through a bind mount, so the file must
 # be readable for that user: owner root, group 65532, mode 0440. That needs root (run with sudo).
@@ -19,7 +20,7 @@ case "${1:-}" in
   '') ;;
   --rotate) rotate=1 ;;
   -h | --help)
-    sed -n '2,13p' "${BASH_SOURCE[0]}"
+    sed -n '2,14p' "${BASH_SOURCE[0]}"
     exit 0
     ;;
   *) die "unknown option: $1 (try --help)" ;;
@@ -42,6 +43,9 @@ else
   openssl rand -hex 32 >"$tmp"
   mv "$tmp" "$file"
   info "wrote secrets/altcha_secret (64 hex characters)"
+  if [ "$rotate" -eq 1 ]; then
+    info "the running server still uses the old secret: apply the new one with docker compose up -d --force-recreate cometcast-server (ends all rooms; clients reconnect)"
+  fi
 fi
 
 # Always (also when the file exists): fixes directories made by older versions of this script (0750).

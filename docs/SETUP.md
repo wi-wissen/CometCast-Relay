@@ -104,9 +104,11 @@ Log in as root on the new VPS (first time only), then:
 4. **Host firewall.** Two ways, use one of them (read the comments in the files first; keep a second SSH session open).
    Both detect the SSH port(s) (the port of your current session, `sshd -T` as root, the listening sshd sockets, `sshd_config`, else 22)
    and print what they found: **read that line**, a wrong port locks you out. Override with `SSH_PORT=2222` (ufw.sh) or `--ssh-port 2222` (gen-nftables.sh).
+   `sudo` removes `SSH_CONNECTION`, so as root the port of your session is not seen and the result can differ from the dry run: `ufw.sh --apply` under `sudo`
+   therefore refuses to run without `SSH_PORT`; pass the port(s) the dry run printed.
    ```sh
-   firewall/ufw.sh              # prints the commands (dry run)
-   sudo firewall/ufw.sh --apply
+   firewall/ufw.sh              # prints the commands (dry run) and the SSH port(s) it found
+   sudo SSH_PORT=22 firewall/ufw.sh --apply   # the port(s) from the dry run
    # or nftables: the files are generated from templates (no hand-edited port):
    firewall/gen-nftables.sh --check        # as root for --check; writes firewall/generated/{nftables.conf,stun-ratelimit.nft}
    sudo nft -f firewall/generated/nftables.conf
@@ -175,8 +177,8 @@ Creates `secrets/altcha_secret` (64 hex characters from `openssl rand`), owner `
 image), mode `0440`. The directory `secrets/` is `root:root` mode `0711`: **everybody may walk through it** (so that `up.sh`, `bootstrap.sh` and
 `docker compose`, run by the unprivileged `deploy` user, can see that the file exists; with the old `0750` they could not and reported it as missing),
 but only root may list it, and the file stays unreadable for everybody except root and the container's group. `deploy` never reads the secret:
-the Docker daemon (root) does the bind mount. Re-running the script fixes the directory of an older install. It never prints the secret, never overwrites an existing one (`--rotate` replaces it: puzzles in
-flight stop working, nothing else) and the directory is ignored by git. The server needs the secret file so that
+the Docker daemon (root) does the bind mount. Re-running the script fixes the directory of an older install. It never prints the secret, never overwrites an existing one (`--rotate` replaces it; the server
+reads the secret only at start, so the new one takes effect after `docker compose up -d --force-recreate cometcast-server`, which ends all rooms and makes puzzles in flight fail once) and the directory is ignored by git. The server needs the secret file so that
 puzzles survive a restart. There is no other secret in this stack: Caddy's certificates are created by Caddy itself on the
 first start and live in a Docker volume.
 
@@ -293,7 +295,7 @@ docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .le
 docker compose restart stun               # config/stun.conf changed (the file is read at start)
 docker compose restart cometcast-server   # config/relay.toml changed; ends all rooms; also clears all bans (see 10.5)
 scripts/reload-caddy.sh                   # Caddyfile or block list changed: validates first, then reloads without losing a room; a broken file leaves Caddy untouched
-docker compose restart caddy              # only if the single-file mount went stale (an editor that replaces the file): validate FIRST with scripts/check-caddyfile.sh --validate-only, a restart with a broken file leaves the relay down
+docker compose up -d --force-recreate caddy  # only if reload-caddy.sh says the single-file mount went stale (an editor that replaced the Caddyfile; it validated the file first)
 docker compose up -d --force-recreate     # everything
 docker compose down                        # stop (volumes, and so the certificates, stay)
 ```
@@ -315,7 +317,10 @@ what runs), writes the version to `.env`, recreates the containers (all rooms en
 - **STUN** (warns): the `stun` service is brought up afterwards and `verify.sh --only stun` checks it (container, `/ice-servers` list, the UDP checks). A failure only **prints a warning and keeps the new version**: the STUN service does
   not depend on the server version, and a UDP path that is blocked (provider firewall) or a host that cannot reach its own address must not take a working relay back.
 
-The checks connect to `127.0.0.1` (the published ports, certificate verified by name), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
+The checks connect to `127.0.0.1` (the published ports, certificate verified by name; to `BIND_ADDR` instead when `.env` sets one address), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
+
+`up.sh`, `update.sh` and `rollback.sh` hold a lock (`.state/lock`): one of them started while another runs stops at once. If `update.sh` is interrupted
+(Ctrl-C, `TERM`, a closed SSH session) before the core check has passed, it sets `.env` back to the previous version and stops; then run `scripts/up.sh`.
 
 The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
 `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
@@ -389,7 +394,7 @@ The only visibility is at the edge:
 | Rooms, bans, counters | server memory | **No state on disk** (confirmed by the server documentation). Nothing to back up; a restart ends all rooms and clears bans. |
 | Configuration | this repository (`config/`, `Caddyfile`, `compose.yaml`) | In git. |
 | `.env` | host only, no secrets inside | Keep a copy of the two values (version, domain). |
-| `secrets/altcha_secret` | host only | Regenerate with `gen-secrets.sh --rotate` if lost (only puzzles in flight fail). |
+| `secrets/altcha_secret` | host only | Regenerate with `gen-secrets.sh --rotate` if lost, then `docker compose up -d --force-recreate cometcast-server` (the server reads it only at start; ends all rooms, puzzles in flight fail once). |
 | Caddy volume `cometcast-relay_caddy_data` | Docker volume | ACME account and the certificate with its private key. Not fatal to lose (a new certificate is requested), but Let's Encrypt limits duplicate certificates (currently 5 per week for the same names, **UNCERTAIN: check their current limits**), so repeated rebuilds can lock you out for days. |
 | `config/caddy.d/blocklist.caddy` | host only | Your block list. |
 | Version history and image digests `.state/` | host only | Convenience for rollback (`version-history`, `image-lock`). Losing the lock only means the next update records a new digest. |
@@ -458,7 +463,7 @@ How it is locked down (all checked on a local run, section 12):
 | --- | --- |
 | No relaying | `stun-only` (coturn ignores every TURN request) and `no-tcp-relay`. No users, no secret, no realm, no `no-auth`. A TURN Allocate request, also one made with `turnutils_uclient` and made-up credentials, gets **no answer at all** and no allocation: that is what coturn 4.18.0 really does in `stun-only` mode (checked with the real container: Allocate, Refresh, CreatePermission and ChannelData are all dropped silently). `scripts/stun-check.py` therefore requires **silence** on every `verify.sh` run: a success fails it, and so does any error answer, in particular `401 Unauthorized`, `437 Allocation Mismatch` or `441 Wrong Credentials` (what a normal TURN server answers; a service that says so is a TURN server that merely refuses, not a STUN-only one). The check is proven to be able to fail: `scripts/check-stun.sh` starts the same image as a normal TURN server (long-term credentials) as a **positive control**, which answers `401`, and requires `stun-check.py` to reject it with `answered with TURN error 401`. (An earlier version of the check accepted any error answer, so the 401 of a normal TURN server would have passed it.) |
 | Listeners | UDP 3478 only (`no-tcp`, `no-tls`). `no-dtls` does **not exist** in 4.18 (tested: coturn logs `WARNING Bad configuration format: no-dtls` and carries on, so a wrong option does not stop the container; `check-stun.sh` fails on that line); DTLS has no listener without a certificate (the only sockets in the container are UDP 3478). `no-cli` is **deprecated** in 4.18 (`ERROR no-cli option is deprecated`, so it is not set) and the telnet CLI is off by default (no TCP socket at all). Published as `3478/udp` only. STUN over TCP/TLS is not offered: browsers use UDP for this and TCP would add nothing but a service to attack. |
-| Small answers | A Binding answer is **32 bytes for a 20-byte request** (factor 1.6): header plus XOR-MAPPED-ADDRESS, no SOFTWARE, no RFC 3489 or RFC 5780 attributes (`no-rfc5780`, `no-software-attribute`; in 4.18 these are defaults, written down so a newer coturn cannot widen the answer silently). **Malformed requests were measured too** (17 variants: unknown attributes, a length field larger than the packet, no magic cookie, CHANGE-REQUEST, bad FINGERPRINT/MESSAGE-INTEGRITY, other message types, ChannelData, short and empty datagrams): 12 get no answer, 5 are answered (28 to 36 bytes for an unknown required attribute, which is a `420` error answer; 28 to 28 for CHANGE-REQUEST, also `420`; 28 to 32, 32 to 32 and 44 to 32 bytes for optional or ignorable attributes), so the **largest factor over all of them is 1.6 (the plain request); no malformed request gets more than 1.3**, and a padded request gets less than 1 (a 1196-byte request gets 32 bytes). `stun-check.py` fails if any answer ever exceeds 3 times its request. |
+| Small answers | A Binding answer is **32 bytes for a 20-byte request** (factor 1.6): header plus XOR-MAPPED-ADDRESS, no SOFTWARE, no RFC 3489 or RFC 5780 attributes (defaults in 4.18; `no-software-attribute` is written down so a newer coturn cannot widen the answer silently; `no-rfc5780` is deprecated in 4.18 and not set, `check-stun.sh` fails on any `deprecated` log line). **Malformed requests were measured too** (17 variants: unknown attributes, a length field larger than the packet, no magic cookie, CHANGE-REQUEST, bad FINGERPRINT/MESSAGE-INTEGRITY, other message types, ChannelData, short and empty datagrams): 12 get no answer, 5 are answered (28 to 36 bytes for an unknown required attribute, which is a `420` error answer; 28 to 28 for CHANGE-REQUEST, also `420`; 28 to 32, 32 to 32 and 44 to 32 bytes for optional or ignorable attributes), so the **largest factor over all of them is 1.6 (the plain request); no malformed request gets more than 1.3**, and a padded request gets less than 1 (a 1196-byte request gets 32 bytes). `stun-check.py` fails if any answer ever exceeds 3 times its request. |
 | Garbage | Random bytes get no answer. |
 | Container | not host networking (own Docker network `stun`, so it sees no host service); `read_only`, `tmpfs` for `/tmp`, user `nobody`, `cap_drop: ALL` with only `NET_BIND_SERVICE` added back (needed by the binary's file capability, effective capabilities are empty), `no-new-privileges`, `mem_limit 128m`, `pids_limit 256`, `cpus 0.5` (UNCERTAIN: guesses, never load-tested), image pinned by tag and digest, health check = a real Binding request (`turnutils_stunclient`; tested with the real container that it exits **1** with `STUN receive timeout` both when nothing listens and when a silent socket drops the packet, and 0 when answered, so an unanswered request does make the container unhealthy). |
 | Logs | No per-request log lines and no client addresses at the default verbosity. |

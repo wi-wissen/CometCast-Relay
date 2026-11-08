@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Unit tests of the helpers in lib.sh that decide things: version comparison (the minimum server version check of
-# update.sh/rollback.sh/up.sh), the image digest lock file and the SSH port list. No Docker, no network. Used by CI.
+# update.sh/rollback.sh/up.sh), the image digest lock file, port numbers, the check address and the SSH port list.
+# No Docker, no network. Used by CI.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -67,6 +68,28 @@ test_lock() (
   [ "$(lock_digest 0.1.1)" = "$d2" ] || exit 1
 )
 t "image lock: record, replace, remove" test_lock
+
+# Port numbers (ufw.sh, gen-nftables.sh).
+t "port 1 is valid" valid_port 1
+t "port 65535 is valid" valid_port 65535
+n "port 0 is not valid" valid_port 0
+n "port 65536 is not valid" valid_port 65536
+n "port 70000 is not valid" valid_port 70000
+n "port 022 (leading zero) is not valid" valid_port 022
+n "empty port is not valid" valid_port ''
+n "port 99999999999999999999 is not valid" valid_port 99999999999999999999
+
+# check_ip: the address of the post-update checks.
+test_check_ip() (
+  ROOT=$tmp
+  printf 'RELAY_DOMAIN=x\n' >"$tmp/.env"
+  [ "$(check_ip)" = 127.0.0.1 ] || exit 1
+  printf 'BIND_ADDR=0.0.0.0\n' >"$tmp/.env"
+  [ "$(check_ip)" = 127.0.0.1 ] || exit 1
+  printf 'BIND_ADDR=203.0.113.9\n' >"$tmp/.env"
+  [ "$(check_ip)" = 203.0.113.9 ] || exit 1
+)
+t "check_ip: 127.0.0.1 unless BIND_ADDR names one address" test_check_ip
 
 # SSH port detection: the session's own port is always included (a wrong list locks you out).
 got=$(SSH_CONNECTION='198.51.100.7 51234 203.0.113.9 2222' detect_ssh_ports)

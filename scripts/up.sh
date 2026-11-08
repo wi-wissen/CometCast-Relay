@@ -9,6 +9,7 @@ set -euo pipefail
 
 need_cmd docker
 [ -f "$ROOT/.env" ] || die "missing .env (cp .env.example .env and edit it)"
+state_lock
 [ -f "$ROOT/secrets/altcha_secret" ] || die "missing secrets/altcha_secret (sudo scripts/gen-secrets.sh; if it exists, secrets/ must be traversable: root:root 0711, re-run gen-secrets.sh)"
 
 version=$(env_get COMETCAST_VERSION)
@@ -25,11 +26,14 @@ compose config -q
 # first time only: pull before starting so that the container is created with the digest right away.
 image=$IMAGE_REPO:$version
 if [ -z "$(lock_digest "$version")" ]; then
+  # COMETCAST_VERSION may have been edited by hand: drop a digest left over from the old version first, or
+  # the pull would fetch that old digest instead of the tag.
+  pin_version "$version"
   if ! docker image inspect "$image" >/dev/null 2>&1; then
     info "pulling $image ..."
-    compose pull cometcast-server
+    compose pull cometcast-server || die "could not pull $image"
   fi
-  digest=$(image_digest "$image")
+  digest=$(image_digest "$image") || die "$image is not on this host after the pull; cannot record its digest"
   if [ -n "$digest" ]; then
     lock_record "$version" "$digest"
     info "recorded $version = $digest in .state/image-lock"

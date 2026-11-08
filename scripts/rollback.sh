@@ -22,6 +22,7 @@ need_cmd docker
 # Extra arguments for verify.sh (only for non-default setups, for example VERIFY_ARGS="--cacert /path/ca.pem").
 read -r -a vargs <<<"${VERIFY_ARGS:-}"
 [ -f "$ROOT/.env" ] || die "missing .env"
+state_lock
 current=$(env_get COMETCAST_VERSION)
 target=${1:-}
 min=$(min_server_version)
@@ -66,8 +67,9 @@ if ! wait_healthy 120 cometcast-server caddy; then
 fi
 record_version "$target"
 info "now on $target"
+ip=$(check_ip)
 rc=0
-"$ROOT/scripts/verify.sh" --only core --quiet-header --ip 127.0.0.1 "${vargs[@]}" || rc=$?
+"$ROOT/scripts/verify.sh" --only core --quiet-header --ip "$ip" "${vargs[@]}" || rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
 compose up -d stun >/dev/null 2>&1 || true
-"$ROOT/scripts/verify.sh" --only stun --quiet-header --ip 127.0.0.1 "${vargs[@]}" || warn "the STUN checks failed (the relay itself is fine): docker compose logs stun; scripts/verify.sh --only stun"
+"$ROOT/scripts/verify.sh" --only stun --quiet-header --ip "$ip" "${vargs[@]}" || warn "the STUN checks failed (the relay itself is fine): docker compose logs stun; scripts/verify.sh --only stun"
