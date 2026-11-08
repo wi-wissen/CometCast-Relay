@@ -77,6 +77,7 @@ if [ -z "$(lock_digest "$current")" ]; then
   [ -z "$cur_digest" ] || lock_record "$current" "$cur_digest"
 fi
 # Until the core check has passed, an interruption puts the pin in .env back to the version we came from.
+# shellcheck disable=SC2329  # called by the traps below
 interrupted() {
   trap - INT TERM HUP
   pin_version "$current" || true
