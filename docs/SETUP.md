@@ -315,7 +315,7 @@ what runs), writes the version to `.env`, recreates the containers (all rooms en
 - **STUN** (warns): the `stun` service is brought up afterwards and `verify.sh --only stun` checks it (container, `/ice-servers` list, the UDP checks). A failure only **prints a warning and keeps the new version**: the STUN service does
   not depend on the server version, and a UDP path that is blocked (provider firewall) or a host that cannot reach its own address must not take a working relay back.
 
-The checks connect to `127.0.0.1` (the published ports, certificate verified by name), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
+The checks connect to `127.0.0.1` (the published ports, certificate verified by name; to `BIND_ADDR` instead when `.env` sets one address), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
 
 The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
 `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.

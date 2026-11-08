@@ -118,11 +118,38 @@ compose() {
   docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" "$@"
 }
 
+# valid_port VALUE: succeeds for a port number 1..65535 (decimal, no leading zero).
+valid_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]; }
+
+# check_ip: the address that update.sh and rollback.sh connect to for their checks (verify.sh --ip): BIND_ADDR
+# from .env when it names one address (the published ports listen only there), else 127.0.0.1.
+check_ip() {
+  local a
+  a=$(env_get BIND_ADDR)
+  case $a in
+    '' | 0.0.0.0 | :: | '[::]') printf '127.0.0.1' ;;
+    *) printf '%s' "$a" ;;
+  esac
+}
+
 # shellcheck disable=SC2034  # used by update.sh and rollback.sh
 IMAGE_REPO=ghcr.io/wi-wissen/cometcast-server
 
 STATE_DIR=$ROOT/.state
 HISTORY=$STATE_DIR/version-history
+
+# state_lock: take an exclusive lock (.state/lock) for the rest of this process, so that up.sh, update.sh and
+# rollback.sh never run at the same time. Dies at once when another one holds it. A script started by the
+# holder (update.sh runs rollback.sh) inherits the lock: COMETCAST_LOCK_PID names the holder's PID.
+state_lock() {
+  if [ -n "${COMETCAST_LOCK_PID:-}" ] && [ "$COMETCAST_LOCK_PID" = "$PPID" ]; then return 0; fi
+  need_cmd flock
+  mkdir -p "$STATE_DIR"
+  exec 9>>"$STATE_DIR/lock"
+  flock -n 9 || die "another up.sh, update.sh or rollback.sh is running (lock: $STATE_DIR/lock); wait until it has finished"
+  COMETCAST_LOCK_PID=$$
+  export COMETCAST_LOCK_PID
+}
 
 # record_version VERSION: append "UTC-time version" to the history used by rollback.sh.
 record_version() {

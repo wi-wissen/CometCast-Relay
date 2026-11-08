@@ -66,8 +66,9 @@ if ! wait_healthy 120 cometcast-server caddy; then
 fi
 record_version "$target"
 info "now on $target"
+ip=$(check_ip)
 rc=0
-"$ROOT/scripts/verify.sh" --only core --quiet-header --ip 127.0.0.1 "${vargs[@]}" || rc=$?
+"$ROOT/scripts/verify.sh" --only core --quiet-header --ip "$ip" "${vargs[@]}" || rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
 compose up -d stun >/dev/null 2>&1 || true
-"$ROOT/scripts/verify.sh" --only stun --quiet-header --ip 127.0.0.1 "${vargs[@]}" || warn "the STUN checks failed (the relay itself is fine): docker compose logs stun; scripts/verify.sh --only stun"
+"$ROOT/scripts/verify.sh" --only stun --quiet-header --ip "$ip" "${vargs[@]}" || warn "the STUN checks failed (the relay itself is fine): docker compose logs stun; scripts/verify.sh --only stun"

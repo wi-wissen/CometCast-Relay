@@ -12,8 +12,8 @@
 # 5. checks the STUN service separately (verify.sh --only stun: UDP, the /ice-servers list). A failure there only
 #    prints a warning and KEEPS the new version: the STUN service does not depend on the server version, and a
 #    broken UDP path (provider firewall, NAT hairpin) is no reason to take the relay back.
-# The checks connect to 127.0.0.1 (the published ports) so that a host that cannot reach its own public address
-# (no NAT hairpin) is not mistaken for a broken relay.
+# The checks connect to 127.0.0.1 (the published ports; BIND_ADDR instead when .env sets one address) so that a host
+# that cannot reach its own public address (no NAT hairpin) is not mistaken for a broken relay.
 # --no-pull: use an image that is already on this host (for example loaded with `docker load`).
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -77,7 +77,7 @@ pin_version "$version"
 info "updating $current -> $version (rooms end, clients reconnect) ..."
 
 # verify.sh talks to the published ports on this host directly.
-core_args=(--quiet-header --ip 127.0.0.1 "${vargs[@]}")
+core_args=(--quiet-header --ip "$(check_ip)" "${vargs[@]}")
 
 core_ok=1
 if ! wait_healthy 120 cometcast-server caddy; then
