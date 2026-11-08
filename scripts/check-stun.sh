@@ -55,9 +55,11 @@ if [ "$(docker inspect -f '{{.State.Running}}' "$name")" != true ]; then
   tail -n 20 <<<"$logs"
   die "the STUN container stopped; see the log above"
 fi
-# coturn does not stop for an unknown option: it logs "WARNING Bad configuration format" and carries on.
-if grep -Eq 'Bad configuration format|CONFIG ERROR|ERROR' <<<"$logs"; then
-  grep -E 'Bad configuration format|CONFIG ERROR|ERROR' <<<"$logs"
+# coturn does not stop for an unknown option: it logs "WARNING Bad configuration format" and carries on. A deprecated
+# option is not always logged as ERROR, so any line with "deprecated" (any case) counts too.
+problems='Bad configuration format|CONFIG ERROR|ERROR|[Dd][Ee][Pp][Rr][Ee][Cc][Aa][Tt][Ee][Dd]'
+if grep -Eq "$problems" <<<"$logs"; then
+  grep -E "$problems" <<<"$logs"
   die "coturn reported a configuration problem (an option that this coturn version does not know, or a deprecated one?)"
 fi
 ok "coturn started with config/stun.conf without configuration problems"
