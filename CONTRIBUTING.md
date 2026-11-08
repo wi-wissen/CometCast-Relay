@@ -9,7 +9,7 @@ Before opening a pull request run what CI runs:
 shellcheck -x -P SCRIPTDIR scripts/*.sh firewall/*.sh
 scripts/test-lib.sh
 python3 -I -m py_compile scripts/ws-check.py scripts/stun-check.py
-firewall/gen-nftables.sh --out-dir /tmp/nft --check   # as root: nft -c on the generated files
+firewall/gen-nftables.sh --ssh-port 22 --out-dir /tmp/nft --check   # as root: nft -c on the generated files
 pip install --require-hashes -r requirements-ci.txt && yamllint -c .yamllint.yaml compose.yaml internal/compose.yaml .github/workflows .yamllint.yaml
 scripts/check-stun.sh                      # needs Docker
 scripts/lint-config.sh

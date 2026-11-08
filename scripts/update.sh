@@ -15,6 +15,8 @@
 # The checks connect to 127.0.0.1 (the published ports; BIND_ADDR instead when .env sets one address) so that a host
 # that cannot reach its own public address (no NAT hairpin) is not mistaken for a broken relay.
 # --no-pull: use an image that is already on this host (for example loaded with `docker load`).
+# VERIFY_ATTESTATION=1 (environment or .env): check the image's build provenance with `gh attestation verify` after the
+# pull and stop (nothing changed) if that fails. Off by default; UNCERTAIN until the first release (docs/SETUP.md 10.3).
 # Holds .state/lock (no second up.sh/update.sh/rollback.sh meanwhile). Interrupted (Ctrl-C, TERM, HUP) before the core
 # check has passed, it sets .env back to the previous version and tells you to run scripts/up.sh.
 set -euo pipefail
@@ -29,7 +31,7 @@ while [ $# -gt 0 ]; do
     --no-pull) pull=0 ;;
     --no-rollback) rollback=0 ;;
     -h | --help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}"
+      sed -n '2,21p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     -*) die "unknown option: $1" ;;
@@ -63,6 +65,8 @@ else
   docker image inspect "$image" >/dev/null 2>&1 || die "$image is not on this host (nothing was changed)"
 fi
 digest=$(image_digest "$image")
+# Optional (VERIFY_ATTESTATION=1): the build provenance attestation must check out before anything is recorded.
+verify_attestation "$image" "$digest"
 if [ -n "$digest" ]; then
   info "image: $image ($digest)"
   lock_record "$version" "$digest"

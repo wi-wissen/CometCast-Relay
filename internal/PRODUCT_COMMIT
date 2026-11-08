@@ -1,11 +1,11 @@
 # Written by scripts/sync-from-product.sh. Do not edit by hand.
 source: https://github.com/wi-wissen/CometCast (path deploy/)
-commit: ef684e2300e1cabaf61187140a48a524404c8a7d
-commit-date: 2026-11-07
+commit: 3e7bc99a3efb63b07abb66bd392664e2b7aea007
+commit-date: 2026-11-08
 files (sha256 of the vendored copies):
-  7808bcc93b214a68d01e949222ddfc1ac8eb887559e5f715986d335af40c13ee  coturn/render.sh
-  115e820e675b790694bed2d4929b44cd6dacabeecd3815e91b860a9480eeca7e  coturn/test-render.sh
+  239f4d670fa23f5e0b2be8207a9a660800fb4afa8ae0d89ee44c7d936853f393  coturn/render.sh
+  fe78dbad3fe234f3d29bdd41fe03e5c8e7ba09e813026bab47b801c4d607c5ba  coturn/test-render.sh
   f3df36336a06535dadac0ce42ce89232aac9692aab10430597f10f12df6ac829  coturn/turnserver.conf.template
-  e7a0a562ea9b6b52c1d3369bb8a5b9af2f36ac772e7421a583f81e572ed5c5a7  upstream/docker-compose.yml
-  94f29a913496290a08ddc142ffe12b49f1e751eb2766179fe69e551d3450ed9d  upstream/cometcast-server.example.toml
-  354a8fd0d17827649ed1dd5cd10164376b7ad6c957e1628f072941789d9dcd50  upstream/env.example
+  47b2bd404d09b7be86d6603c579954aa6f2e860906f5a7ddafd36c1ac373ed76  upstream/docker-compose.yml
+  36cd36112ef74dc82fa0a80b8f0e3199269845cbd365508392378520819a9571  upstream/cometcast-server.example.toml
+  c72438726edf0be5313e4c3c5b1f831cfa62e1c26d47be7d53f00fc31c722f48  upstream/env.example

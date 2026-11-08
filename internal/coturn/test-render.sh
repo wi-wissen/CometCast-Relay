@@ -160,6 +160,29 @@ setup 'abcdefghijklmnopqrstuvwxyz$(id)\n';           bad "secret with shell synt
 setup 'abcdefghijklmnopqrstuvwxyz&\\\\0123\n';        bad "secret with & and backslash"
 setup 'abcdefghijklmnopqrstuvwxyz;rm\n';             bad "secret with a semicolon"
 
+# --- group access (TURN_CONF_GROUP, COTURN_GID) ------------------------------------------
+# The shared nogroup is refused before anything is written; a numeric group must equal COTURN_GID.
+for g in 65534 nogroup nobody 'a b' 'a;b'; do
+  setup "$good_secret"; export TURN_CONF_GROUP="$g"; bad "TURN_CONF_GROUP '$g'"; unset TURN_CONF_GROUP
+done
+setup "$good_secret"; export TURN_CONF_GROUP=3479; bad "TURN_CONF_GROUP that is not COTURN_GID (default 3478)"; unset TURN_CONF_GROUP
+for g in 65534 0 03478 abc -1 99999999999; do
+  setup "$good_secret"; setting COTURN_GID "$g"; bad "COTURN_GID '$g'"
+done
+# A group the test user is in (no root needed; root may use any group, 3478 then): file and key get
+# that group and mode 640.
+mygid=$(id -g)
+[ "$(id -u)" != 0 ] || mygid=3478
+if [ "$mygid" != 65534 ]; then
+  setup "$good_secret"; setting COTURN_GID "$mygid"
+  mkdir -p "$work/deploy/certs"; echo key > "$work/deploy/certs/privkey.pem"; chmod 600 "$work/deploy/certs/privkey.pem"
+  export TURN_CONF_GROUP="$mygid"; ok "TURN_CONF_GROUP = COTURN_GID = own group"; unset TURN_CONF_GROUP
+  for f in coturn/turnserver.conf certs/privkey.pem; do
+    got=$(stat -c '%a %g' "$work/deploy/$f" 2>/dev/null || stat -f '%Lp %g' "$work/deploy/$f")
+    count=$((count + 1)); [ "$got" = "640 $mygid" ] || { echo "FAIL: $f is '$got', want '640 $mygid'"; fails=$((fails + 1)); }
+  done
+fi
+
 # --- missing files -------------------------------------------------------------------
 setup "$good_secret"; rm "$work/deploy/.env"; bad "missing .env"
 setup "$good_secret"; rm "$work/deploy/secrets/turn_secret"; bad "missing secret"

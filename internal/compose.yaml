@@ -10,13 +10,14 @@
 # the product repository (docs/server.md "First real run"); THIS file was only validated, not run on a
 # real network. UNCERTAIN: two real devices through TURN, NAT, TLS on 5349, IPv6, a real certificate.
 #
-# Run from THIS folder (internal/). The UIDs matter: the server image runs as 65532, the coturn image as
-# nobody (65534); neither runs as root. Steps (details in README.md):
+# Run from THIS folder (internal/). The UIDs matter: the server image runs as 65532, coturn as COTURN_UID:COTURN_GID
+# from .env (default 3478:3478, a group of its own, NOT the image's nobody:nogroup 65534, which other host daemons
+# share); neither runs as root. Steps (details in README.md):
 #   1. cp .env.example .env ; cp config/server.example.toml config/server.toml   (edit both)
 #   2. mkdir -p secrets certs ; openssl rand -hex 32 > secrets/turn_secret ; openssl rand -hex 32 > secrets/altcha_secret
 #      sudo chown root:65532 secrets/* ; sudo chmod 640 secrets/*
-#   3. certs/fullchain.pem and certs/privkey.pem ; sudo chown 65532:65534 certs/privkey.pem ; sudo chmod 640 certs/privkey.pem
-#   4. sudo TURN_CONF_GROUP=65534 ./coturn/render.sh
+#   3. certs/fullchain.pem and certs/privkey.pem ; sudo chown 65532:3478 certs/privkey.pem ; sudo chmod 640 certs/privkey.pem
+#   4. sudo TURN_CONF_GROUP=3478 ./coturn/render.sh   (= COTURN_GID; also sets group and mode 640 of certs/privkey.pem)
 #   5. docker compose up -d
 
 name: cometcast-internal
@@ -56,6 +57,10 @@ services:
     # COTURN_VERSION, this derived file does not).
     image: coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
     restart: unless-stopped
+    # Own UID:GID instead of the image's nobody:nogroup: on Debian/Ubuntu GID 65534 is the host's shared nogroup,
+    # and turnserver.conf (TURN secret) and the TLS key are given to coturn's group with mode 640. Pick IDs no host
+    # user or group has. Same as upstream/docker-compose.yml. UNCERTAIN: not run with this user yet.
+    user: "${COTURN_UID:-3478}:${COTURN_GID:-3478}"
     # A whole range of UDP ports is used for relaying; host networking avoids mapping them. Linux only.
     network_mode: host
     command: ["-c", "/etc/coturn/turnserver.conf"]

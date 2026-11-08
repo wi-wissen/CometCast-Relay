@@ -37,9 +37,9 @@ sudo chown root:65532 secrets/*; sudo chmod 640 secrets/*
 
 cp /path/to/fullchain.pem certs/fullchain.pem
 cp /path/to/privkey.pem certs/privkey.pem
-sudo chown 65532:65534 certs/privkey.pem; sudo chmod 640 certs/privkey.pem   # server (65532) and coturn (65534) read it
+sudo chown 65532:3478 certs/privkey.pem; sudo chmod 640 certs/privkey.pem    # server (65532) and coturn (COTURN_GID) read it
 
-sudo TURN_CONF_GROUP=65534 ./coturn/render.sh         # writes coturn/turnserver.conf (holds the TURN secret)
+sudo TURN_CONF_GROUP=3478 ./coturn/render.sh          # = COTURN_GID; writes coturn/turnserver.conf (holds the TURN secret)
 docker compose up -d
 docker compose ps                                     # both services healthy
 curl --cacert certs/fullchain.pem https://your.host:8443/healthz
@@ -52,6 +52,16 @@ Firewall: TCP 8443 (or 443 behind your proxy), UDP and TCP 3478, TCP 5349, and t
 `.env` (default 49160-49660). Keep coturn's CLI port 5766 closed (it is off). Docker-published ports are
 not filtered by ufw rules; coturn uses host networking, so ufw does apply to it.
 
+## coturn user and group
+
+coturn runs as `COTURN_UID:COTURN_GID` from `.env` (default `3478:3478`), not as the image's `nobody:nogroup` (65534). On
+Debian and Ubuntu GID 65534 is the host's shared `nogroup`; giving `turnserver.conf` (its `static-auth-secret` mints TURN
+credentials) and the TLS key to that group would let other daemons read them. `render.sh` refuses 65534 and requires
+`TURN_CONF_GROUP` to equal `COTURN_GID`. Choose IDs no host user or group has (`getent passwd 3478; getent group 3478`
+print nothing). Coming from the old 65534 steps: re-run `sudo TURN_CONF_GROUP=3478 ./coturn/render.sh`, `sudo chown
+65532:3478 certs/privkey.pem`, `docker compose up -d`. UNCERTAIN: not run with the new user yet (product repository
+`deploy/README.md`, "coturn user and group").
+
 ## Know before you use it
 
 - `render.sh` checks the syntax of `TURN_EXTERNAL_IP`, not whether it is really public.
@@ -63,7 +73,7 @@ not filtered by ufw rules; coturn uses host networking, so ufw does apply to it.
 
 ## Status (UNCERTAIN)
 
-`docker compose config` and `coturn/test-render.sh` (164 checks) pass in CI, and the server image started
+`docker compose config` and `coturn/test-render.sh` (179 checks) pass in CI, and the server image started
 with a configuration derived from `config/server.example.toml`. This compose file itself was not run with
 coturn on a real network. Not verified anywhere: two real devices through TURN, NAT, TURN over TLS (5349),
 IPv6, a real certificate, arm64. Read "What is NOT verified" in the product's

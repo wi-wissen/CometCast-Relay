@@ -9,6 +9,8 @@
 #   --ssh-port  TCP port(s) of sshd. Default: detected (the port of your current SSH session, `sshd -T` as root,
 #               the listening sshd sockets, sshd_config, else 22). A wrong port locks you out: read the line
 #               "SSH ports: ..." this script prints, and keep a second session open when loading the file.
+#               sudo removes SSH_CONNECTION, so under sudo the port of your session is not seen: the script then
+#               refuses to guess. Run it without sudo, or give the port(s): sudo firewall/gen-nftables.sh --ssh-port 22
 #   --stun-port UDP port of the STUN service (default: STUN_PORT in .env, else 3478)
 #   --out-dir   default firewall/generated (ignored by git)
 #   --check     run `nft -c -f` on the generated files (needs nft and root)
@@ -44,6 +46,11 @@ done
 
 source_of_ssh="given"
 if [ -z "$ssh_ports" ]; then
+  # sudo removes SSH_CONNECTION from the environment, so under sudo the port of your session is not seen and the
+  # detection can find other ports than a run without sudo did (lockout). Make the operator name them (as ufw.sh does).
+  if [ -n "${SUDO_USER:-}" ] && [ -z "${SSH_CONNECTION:-}" ]; then
+    die "under sudo the port of your SSH session cannot be detected (sudo removes SSH_CONNECTION). Run without sudo (only --check needs root), or name the port(s): sudo firewall/gen-nftables.sh --ssh-port <port> (or sudo SSH_PORT=<port> ...)"
+  fi
   ssh_ports=$(detect_ssh_ports)
   source_of_ssh="detected"
 fi

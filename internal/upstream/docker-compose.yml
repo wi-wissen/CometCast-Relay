@@ -8,20 +8,23 @@
 # NOT run: a real network (two machines, NAT), IPv6, TLS on coturn's port 5349, a real certificate.
 #
 # Before the first start (all paths relative to this folder). The UIDs matter: the server image
-# runs as 65532, the coturn image as nobody (65534); neither runs as root.
+# runs as 65532, coturn runs as COTURN_UID:COTURN_GID from .env (default 3478:3478, a group of its
+# own; NOT the image's nobody:nogroup 65534, which other host daemons share); neither runs as root.
 #   1. cp config/cometcast-server.example.toml config/cometcast-server.toml   (edit it)
 #   2. mkdir -p secrets certs
 #      openssl rand -hex 32 > secrets/turn_secret       (the shared TURN secret)
 #      openssl rand -hex 32 > secrets/altcha_secret     (signs ALTCHA puzzles)
 #      chown root:65532 secrets/*; chmod 640 secrets/*   (the server user reads them via the group)
 #   3. put fullchain.pem and privkey.pem into certs/    (never commit them)
-#      BOTH programs read the key: owner 65532 (server), group 65534 (coturn), mode 640:
-#        chown 65532:65534 certs/privkey.pem; chmod 640 certs/privkey.pem
+#      BOTH programs read the key: owner 65532 (server), group 3478 (coturn, COTURN_GID), mode 640:
+#        chown 65532:3478 certs/privkey.pem; chmod 640 certs/privkey.pem
+#      (step 5 sets the group and mode of certs/privkey.pem again, from TURN_CONF_GROUP)
 #      certbot makes keys readable by root only (0600). If the server cannot read the key it
 #      stops at start with a message that says so (then restarts, see restart policy). coturn does
 #      not stop: it logs a warning and starts WITHOUT TLS on 5349.
 #   4. cp .env.example .env                              (edit it)
-#   5. TURN_CONF_GROUP=65534 ./coturn/render.sh          (makes coturn/turnserver.conf, as root)
+#   5. TURN_CONF_GROUP=3478 ./coturn/render.sh           (makes coturn/turnserver.conf, as root;
+#      the value must be COTURN_GID, render.sh refuses another number and 65534)
 #      The file holds the TURN secret. Without the group it is 600 and coturn cannot read it:
 #      it then starts with its defaults and the TURN relay is unusable.
 #   6. docker compose up -d --build
@@ -76,9 +79,24 @@ services:
     # grace period is 10 s, so it stays below that.
 
   coturn:
-    # Tested tag: 4.18.0 (exists on Docker Hub, run on 2026-11-07). Set COTURN_VERSION in .env.
-    image: coturn/coturn:${COTURN_VERSION:?set COTURN_VERSION in .env}
+    # Pinned by tag AND digest: tag 4.18.0 is the one run on 2026-11-07; the digest is that tag's
+    # multi-arch index on Docker Hub (read 2026-11-07 and again 2026-11-08, unchanged; the same pin
+    # as in the relay repository wi-wissen/cometcast-relay). Update both together, after checking
+    # coturn/turnserver.conf.template with the new version (the template depends on the option set
+    # of 4.18). No variable on purpose (it replaced COTURN_VERSION in .env): Dependabot can update
+    # a literal pin (.github/dependabot.yml).
+    image: coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
     restart: unless-stopped
+    # Own UID and GID instead of the image's nobody:nogroup (65534): on Debian/Ubuntu hosts GID
+    # 65534 is shared by other daemons, and with group 65534 on turnserver.conf (static-auth-secret)
+    # and the TLS key, every process in that group on the host could read both. Pick IDs that no
+    # host user or group has (`getent passwd 3478; getent group 3478` print nothing). coturn needs
+    # no particular UID: the binary's file capability works for any user (NET_BIND_SERVICE below),
+    # and it needs no passwd entry. The image's volume /var/lib/coturn (its default SQLite user DB,
+    # not used with static-auth-secret) stays owned by nobody; coturn then opens it read-only or logs
+    # "Cannot open SQLite DB connection" and carries on (coturn 4.18 source, dbd_sqlite.c).
+    # UNCERTAIN: not run with this user yet (no Docker daemon where it was changed).
+    user: "${COTURN_UID:-3478}:${COTURN_GID:-3478}"
     # coturn uses a whole range of UDP ports for relaying. Host networking avoids mapping
     # hundreds of ports through Docker. Host networking only works on Linux hosts (worked in the run).
     network_mode: host
@@ -89,7 +107,7 @@ services:
     # The turnserver binary in the image carries a file capability (cap_net_bind_service). If that
     # capability is missing from the container's set, exec fails with "Operation not permitted"
     # (found in the first run). So drop everything and add back only this one.
-    # The image runs as user "nobody" (no root).
+    # Runs as COTURN_UID:COTURN_GID (above), never as root.
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
     read_only: true

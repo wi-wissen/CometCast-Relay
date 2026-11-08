@@ -15,6 +15,11 @@
 #    as & | \ have no special meaning anyway.
 #  - The output file is written with mode 600 (also when an older file with other
 #    permissions exists), via a temporary file that replaces it in one step.
+#  - Group access for coturn: TURN_CONF_GROUP=<gid> gives the file (and certs/privkey.pem, if it
+#    exists) to that group with mode 640. It must be the group the coturn container runs with
+#    (COTURN_GID in .env, default 3478, see docker-compose.yml). 65534 (nogroup/nobody) is refused:
+#    on Debian/Ubuntu hosts it is shared by other daemons, which could then read the TURN secret
+#    and the TLS key.
 #
 # Tested with dry renders (deploy/coturn/test-render.sh) and, in the first real run, rendered output
 # was read by coturn 4.18.0 in Docker (docs/server.md).
@@ -106,6 +111,28 @@ check_ip() {
   fi
 }
 
+# The group the coturn container runs with (docker-compose.yml: user COTURN_UID:COTURN_GID).
+COTURN_GID=$(env_value COTURN_GID)
+COTURN_GID=${COTURN_GID:-3478}
+case $COTURN_GID in
+  '' | 0* | *[!0-9]*) die "COTURN_GID must be a number from 1 to 2147483647 (got '$COTURN_GID')" ;;
+esac
+[ "${#COTURN_GID}" -le 10 ] && [ "$COTURN_GID" -le 2147483647 ] || die "COTURN_GID is too large"
+[ "$COTURN_GID" != 65534 ] || die "COTURN_GID=65534 is nogroup, shared with other host daemons; use a group of its own (default 3478)"
+# Checked before anything is written: the group that will be able to read the secret.
+if [ -n "${TURN_CONF_GROUP:-}" ]; then
+  case $TURN_CONF_GROUP in
+    *[!A-Za-z0-9._-]*) die "TURN_CONF_GROUP has characters that are not allowed here" ;;
+    65534 | nogroup | nobody)
+      die "TURN_CONF_GROUP=$TURN_CONF_GROUP is the host's shared nogroup: other daemons in it could read the TURN secret. Use the coturn group: TURN_CONF_GROUP=$COTURN_GID (COTURN_GID in .env)" ;;
+    *[!0-9]*)
+      echo "warning: TURN_CONF_GROUP=$TURN_CONF_GROUP is a name; make sure its GID is $COTURN_GID (COTURN_GID), the group coturn runs with" >&2 ;;
+    *)
+      [ "$TURN_CONF_GROUP" = "$COTURN_GID" ] ||
+        die "TURN_CONF_GROUP=$TURN_CONF_GROUP, but coturn runs with group $COTURN_GID (COTURN_GID in .env, default 3478): it could not read the file" ;;
+  esac
+fi
+
 TURN_REALM=$(env_value TURN_REALM)
 TURN_EXTERNAL_IP=$(env_value TURN_EXTERNAL_IP)
 TURN_LISTENING_IP=$(env_value TURN_LISTENING_IP)   # optional
@@ -184,18 +211,23 @@ awk '
 mv -f "$tmp" "$out"
 chmod 600 "$out"
 trap - EXIT HUP INT TERM
-# The coturn image runs as user "nobody" (UID/GID 65534), NOT as root, and cannot read a root-only 600
-# file: coturn then does not stop, it prints "Cannot find config file" and starts with its DEFAULTS
-# (found in the first run). So: TURN_CONF_GROUP=65534 deploy/coturn/render.sh (needs root, or
-# membership of that group) gives the file to that group with mode 640. Without it the mode stays 600.
+# The coturn container does not run as root (docker-compose.yml: user COTURN_UID:COTURN_GID, default
+# 3478:3478) and cannot read a root-only 600 file: coturn then does not stop, it prints "Cannot find
+# config file" and starts with its DEFAULTS (found in the first run). So:
+# TURN_CONF_GROUP=3478 deploy/coturn/render.sh (needs root, or membership of that group) gives the file
+# to that group with mode 640, and certs/privkey.pem too when it exists (its owner is left alone: it
+# must stay 65532, the server). Without TURN_CONF_GROUP the mode stays 600.
 if [ -n "${TURN_CONF_GROUP:-}" ]; then
-  case $TURN_CONF_GROUP in
-    *[!A-Za-z0-9._-]*) die "TURN_CONF_GROUP has characters that are not allowed here" ;;
-  esac
   chgrp "$TURN_CONF_GROUP" "$out" || die "cannot chgrp $out to $TURN_CONF_GROUP (run as root?)"
   chmod 640 "$out"
   echo "mode 640, group $TURN_CONF_GROUP"
+  key="$deploy/certs/privkey.pem"
+  if [ -f "$key" ]; then
+    chgrp "$TURN_CONF_GROUP" "$key" || die "cannot chgrp $key to $TURN_CONF_GROUP (run as root?)"
+    chmod 640 "$key"
+    echo "certs/privkey.pem: mode 640, group $TURN_CONF_GROUP (owner unchanged; the server needs owner 65532)"
+  fi
 else
-  echo "note: mode 600; the coturn container (user nobody, GID 65534) cannot read it. Run again with TURN_CONF_GROUP=65534 (as root) before docker compose up." >&2
+  echo "note: mode 600; the coturn container (group $COTURN_GID) cannot read it. Run again with TURN_CONF_GROUP=$COTURN_GID (as root) before docker compose up." >&2
 fi
 echo "wrote $out"
