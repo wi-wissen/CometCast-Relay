@@ -15,6 +15,8 @@
 # The checks connect to 127.0.0.1 (the published ports; BIND_ADDR instead when .env sets one address) so that a host
 # that cannot reach its own public address (no NAT hairpin) is not mistaken for a broken relay.
 # --no-pull: use an image that is already on this host (for example loaded with `docker load`).
+# Holds .state/lock (no second up.sh/update.sh/rollback.sh meanwhile). Interrupted (Ctrl-C, TERM, HUP) before the core
+# check has passed, it sets .env back to the previous version and tells you to run scripts/up.sh.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -27,7 +29,7 @@ while [ $# -gt 0 ]; do
     --no-pull) pull=0 ;;
     --no-rollback) rollback=0 ;;
     -h | --help)
-      sed -n '2,18p' "${BASH_SOURCE[0]}"
+      sed -n '2,20p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     -*) die "unknown option: $1" ;;
@@ -46,6 +48,7 @@ need_cmd docker
 # Extra arguments for verify.sh (only for non-default setups, for example VERIFY_ARGS="--cacert /path/ca.pem").
 read -r -a vargs <<<"${VERIFY_ARGS:-}"
 [ -f "$ROOT/.env" ] || die "missing .env"
+state_lock
 current=$(env_get COMETCAST_VERSION)
 if [ "$current" = "$version" ]; then
   info "already on $version; nothing to do (scripts/up.sh re-applies the configuration)"
@@ -73,6 +76,17 @@ if [ -z "$(lock_digest "$current")" ]; then
   cur_digest=$(image_digest "$IMAGE_REPO:$current" || true)
   [ -z "$cur_digest" ] || lock_record "$current" "$cur_digest"
 fi
+# Until the core check has passed, an interruption puts the pin in .env back to the version we came from.
+interrupted() {
+  trap - INT TERM HUP
+  pin_version "$current" || true
+  printf 'error: interrupted during the update to %s; .env points to %s again, but the containers may run %s or be half recreated. Run scripts/up.sh to start %s (or scripts/update.sh %s to try again).\n' \
+    "$version" "$current" "$version" "$current" "$version" >&2
+  exit "$1"
+}
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
+trap 'interrupted 129' HUP
 pin_version "$version"
 info "updating $current -> $version (rooms end, clients reconnect) ..."
 
@@ -93,6 +107,7 @@ else
 fi
 
 if [ "$core_ok" -eq 1 ]; then
+  trap - INT TERM HUP
   record_version "$version"
   info "now on $version. Previous version for rollback: $current"
   # The STUN service and its checks: warnings only.

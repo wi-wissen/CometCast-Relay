@@ -319,6 +319,9 @@ what runs), writes the version to `.env`, recreates the containers (all rooms en
 
 The checks connect to `127.0.0.1` (the published ports, certificate verified by name; to `BIND_ADDR` instead when `.env` sets one address), not to the public address, so a host without NAT hairpin is not mistaken for a broken relay.
 
+`up.sh`, `update.sh` and `rollback.sh` hold a lock (`.state/lock`): one of them started while another runs stops at once. If `update.sh` is interrupted
+(Ctrl-C, `TERM`, a closed SSH session) before the core check has passed, it sets `.env` back to the previous version and stops; then run `scripts/up.sh`.
+
 The images are not signed (see the product's release notes); compare the printed digest with the one you trust:
 `docker buildx imagetools inspect ghcr.io/wi-wissen/cometcast-server:0.1.1`.
 

@@ -22,6 +22,7 @@ need_cmd docker
 # Extra arguments for verify.sh (only for non-default setups, for example VERIFY_ARGS="--cacert /path/ca.pem").
 read -r -a vargs <<<"${VERIFY_ARGS:-}"
 [ -f "$ROOT/.env" ] || die "missing .env"
+state_lock
 current=$(env_get COMETCAST_VERSION)
 target=${1:-}
 min=$(min_server_version)
