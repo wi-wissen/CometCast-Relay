@@ -295,7 +295,7 @@ docker compose logs --no-log-prefix caddy | jq -r 'select(.level=="error" or .le
 docker compose restart stun               # config/stun.conf changed (the file is read at start)
 docker compose restart cometcast-server   # config/relay.toml changed; ends all rooms; also clears all bans (see 10.5)
 scripts/reload-caddy.sh                   # Caddyfile or block list changed: validates first, then reloads without losing a room; a broken file leaves Caddy untouched
-docker compose restart caddy              # only if the single-file mount went stale (an editor that replaces the file): validate FIRST with scripts/check-caddyfile.sh --validate-only, a restart with a broken file leaves the relay down
+docker compose up -d --force-recreate caddy  # only if reload-caddy.sh says the single-file mount went stale (an editor that replaced the Caddyfile; it validated the file first)
 docker compose up -d --force-recreate     # everything
 docker compose down                        # stop (volumes, and so the certificates, stay)
 ```
